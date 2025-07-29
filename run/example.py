@@ -17,7 +17,7 @@ import pprint
 
 from deepsocflow import *
 
-(SIM, SIM_PATH) = ('xsim', "F:/Xilinx/Vivado/2022.2/bin/") if os.name=='nt' else ('verilator', '')
+# (SIM, SIM_PATH) = ('xsim', "F:/Xilinx/Vivado/2022.2/bin/") if os.name=='nt' else ('verilator', '')
 (SIM, SIM_PATH) = ('xsim', '/opt/Xilinx/Vivado/2023.2/bin/') #if os.name=='nt' else ('verilator', '')
 
 '''
@@ -177,7 +177,7 @@ hw = Hardware (                          # Alternatively: hw = Hardware.from_jso
 hw.export_json()
 hw = Hardware.from_json('hardware.json')
 hw.export() # Generates: config_hw.svh, config_hw.tcl
-hw.export_vivado_tcl(board='zcu104')
+hw.export_vivado_tcl(board='zcu102')
 
 
 '''
