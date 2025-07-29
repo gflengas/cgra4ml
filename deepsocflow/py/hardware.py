@@ -14,6 +14,7 @@ class Hardware:
     """
     def __init__(
             self, 
+            board: str = 'zcu104',
             processing_elements: (int, int) = (8,24), 
             frequency_mhz: int = 250, 
             bits_input: int = 4, 
@@ -54,6 +55,7 @@ class Hardware:
             target_cpu_int_bits (int, optional): _description_. Defaults to 32.
         """
         
+        self.board = board
         self.params = locals()
         self.params = {k:self.params[k] for k in self.params if not k == 'self'}
         
@@ -183,7 +185,7 @@ class Hardware:
 `define AXI_WIDTH           {self.AXI_WIDTH          :<10}
 `define HEADER_WIDTH        {self.HEADER_WIDTH       :<10}
 `define AXI_MAX_BURST_LEN   {self.AXI_MAX_BURST_LEN  :<10}
-`define CONFIG_BASEADDR     40'h{self.CONFIG_BASEADDR:<10}
+`define CONFIG_BASEADDR     {32 if self.board == "pynq_z2" else 40}'h{self.CONFIG_BASEADDR:<10}
 ''')
 
 
@@ -191,6 +193,7 @@ class Hardware:
             f.write(f'''
 # Written from Hardware.export()
 
+set BOARD              {self.board}
 set FREQ               {self.FREQ}
 set ROWS               {self.ROWS}
 set COLS               {self.COLS}
@@ -241,21 +244,21 @@ set CONFIG_BASEADDR    0x{self.CONFIG_BASEADDR}
         print(f"\n\nSIMULATION TIME: {time.time()-start:.2f} seconds\n\n")
 
 
-    def export_vivado_tcl(self, board='zcu104', rtl_dir_abspath=None, scripts_dir_abspath=None, board_tcl_abspath=None):
+    def export_vivado_tcl(self, rtl_dir_abspath=None, scripts_dir_abspath=None, board_tcl_abspath=None):
 
         if rtl_dir_abspath is None:
             rtl_dir_abspath = self.MODULE_DIR + '/rtl'
         if scripts_dir_abspath is None:
             scripts_dir_abspath = self.MODULE_DIR + '/tcl/fpga'
         if board_tcl_abspath is None:
-            board_tcl_abspath = f'{scripts_dir_abspath}/{board}.tcl'
+            board_tcl_abspath = f'{scripts_dir_abspath}/{self.board}.tcl'
         
         assert os.path.exists(board_tcl_abspath), f"Board script {board_tcl_abspath} does not exist."
         assert os.path.exists('./config_hw.tcl'), f"./config_hw.tcl does not exist."
 
         with open('vivado_flow.tcl', 'w') as f:
             f.write(f'''
-set PROJECT_NAME dsf_{board}
+set PROJECT_NAME dsf_{self.board}
 set RTL_DIR      {rtl_dir_abspath}
 set CONFIG_DIR   .
 

@@ -9,6 +9,8 @@ run/asic/*
 !deepsocflow/asic/reports
 
 *.pickle
+*.jou
+*.log
 *.h5
 *.keras
 deepsocflow/test/vectors
