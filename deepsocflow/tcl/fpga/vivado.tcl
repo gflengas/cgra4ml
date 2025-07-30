@@ -7,11 +7,25 @@ create_bd_cell -type module -reference axi_cgra4ml axi_cgra4ml_0
 
 if {$BOARD eq "pynq_z2"} {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {32}] [get_bd_cells axi_cgra4ml_0]
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_output] $PS_S_AXI
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_pixel] $PS_S_AXI
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_weights] $PS_S_AXI
-    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} Master $PS_M_AXI_LITE Slave {/axi_cgra4ml_0/s_axil} ddr_seg {Auto} intc_ip {New AXI Interconnect} master_apm {0}}  [get_bd_intf_pins axi_cgra4ml_0/s_axil]
-    apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config { Clk $PS_CLK} [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK]
+
+    # Create and configure the AXI SmartConnect for the HP0 port
+    create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_hp0
+    set_property -dict [list CONFIG.NUM_SI {3} CONFIG.NUM_MI {1}] [get_bd_cells smartconnect_hp0]
+
+    # Connect the AXI masters from the CGRA core to the slave interfaces of the SmartConnect
+    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_output] [get_bd_intf_pins smartconnect_hp0/S00_AXI]
+    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_pixel]  [get_bd_intf_pins smartconnect_hp0/S01_AXI]
+    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_weights] [get_bd_intf_pins smartconnect_hp0/S02_AXI]
+
+    # Connect the master interface of the SmartConnect to the PS High-Performance slave port
+    connect_bd_intf_net [get_bd_intf_pins smartconnect_hp0/M00_AXI] $PS_S_AXI
+
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} Master $PS_M_AXI_LITE Slave {/axi_cgra4ml_0/s_axil} ddr_seg {Auto} intc_ip {New AXI Interconnect} master_apm {0}]  [get_bd_intf_pins axi_cgra4ml_0/s_axil]
+    
+    # Connect the clock for the SmartConnect. The reset is inferred automatically.
+    connect_bd_net [get_bd_pins smartconnect_hp0/aclk] [get_bd_pins processing_system7_0/FCLK_CLK0]
+
+    apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config [list Clk $PS_CLK] [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK]
 } else {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {40}] [get_bd_cells axi_cgra4ml_0]
     connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_output] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HPC0_FPD]
