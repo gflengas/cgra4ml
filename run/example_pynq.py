@@ -152,8 +152,8 @@ Specify Hardware
 '''
 hw = Hardware (                          # Alternatively: hw = Hardware.from_json('hardware.json')
         board               = 'pynq_z2'  , # Target board
-        processing_elements = (8, 24)  , # (rows, columns) of multiply-add units
-        frequency_mhz       = 100      , # A lower frequency is more likely to meet timing on the PYNQ-Z2, will try to raise it later
+        processing_elements = (4, 8)   , # (rows, columns) of multiply-add units - Reduced to help with timing
+        frequency_mhz       = 100      , # A lower frequency is more likely to meet timing on the PYNQ-Z2
         bits_input          = 4        , # bit width of input pixels and activations
         bits_weights        = 4        , # bit width of weights
         bits_sum            = 20       , # bit width of accumulator
@@ -164,9 +164,9 @@ hw = Hardware (                          # Alternatively: hw = Hardware.from_jso
         max_image_size      = 512      , #
         max_n_bundles       = 64       ,
         ram_weights_depth   = 512      , #
-        ram_edges_depth     = 3584     , #
+        ram_edges_depth     = 3584     , # Independent hardware parameter, not dependent on PE size
         axi_width           = 64       , # PYNQ-Z2 PS-PL AXI interfaces are 64-bit
-        config_baseaddr     = "B0000000",
+        config_baseaddr     = "43C00000", # Valid AXI-Lite address for Zynq-7000
         target_cpu_int_bits = 32       , #
         valid_prob          = 1        , # probability in which AXI-Stream s_valid signal should be toggled in simulation
         ready_prob          = 1        , # probability in which AXI-Stream m_ready signal should be toggled in simulation

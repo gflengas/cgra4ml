@@ -153,6 +153,7 @@ print(f"Test loss:{score[0]}, Test accuracy:{score[1]}")
 Specify Hardware
 '''
 hw = Hardware (                          # Alternatively: hw = Hardware.from_json('hardware.json')
+        board               =  'zcu104'   , #
         processing_elements = (8, 24)  , # (rows, columns) of multiply-add units
         frequency_mhz       = 250      , #  
         bits_input          = 4        , # bit width of input pixels and activations
@@ -177,7 +178,7 @@ hw = Hardware (                          # Alternatively: hw = Hardware.from_jso
 hw.export_json()
 hw = Hardware.from_json('hardware.json')
 hw.export() # Generates: config_hw.svh, config_hw.tcl
-hw.export_vivado_tcl(board='zcu102')
+hw.export_vivado_tcl()
 
 
 '''

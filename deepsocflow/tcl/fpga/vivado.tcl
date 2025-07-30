@@ -45,13 +45,16 @@ update_compile_order -fileset sources_1
 
 # Set AXl-lite and full_AXI addresses
 if {$BOARD eq "pynq_z2"} {
-    set_property range 4M [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
-    set_property offset 0x43C00000 [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
+    set_property range 4K [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
+    set_property offset ${CONFIG_BASEADDR} [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
+    
+    # Explicitly assign the Zynq's main memory space to the AXI masters from the accelerator
+    assign_bd_address [get_bd_addr_segs /processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM]
 } else {
     set_property range 256M [get_bd_addr_segs {zynq_ultra_ps_e_0/Data/SEG_axi_cgra4ml_0_reg0}]
     set_property offset ${CONFIG_BASEADDR} [get_bd_addr_segs {zynq_ultra_ps_e_0/Data/SEG_axi_cgra4ml_0_reg0}]
+    assign_bd_address
 }
-assign_bd_address
 save_bd_design
 
 validate_bd_design
@@ -72,6 +75,15 @@ report_utilization -file $PROJECT_NAME/reports/${PROJECT_NAME}_${BOARD}_${FREQ}_
 report_power -file $PROJECT_NAME/reports/${PROJECT_NAME}_${BOARD}_${FREQ}_power_1.txt -name {power_1}
 report_drc -name drc_1 -file $PROJECT_NAME/reports/${PROJECT_NAME}_${BOARD}_${FREQ}_drc_1.txt -ruledecks {default opt_checks placer_checks router_checks bitstream_checks incr_eco_checks eco_checks abs_checks}
 
+
 exec mkdir -p $PROJECT_NAME/output
-exec cp "$PROJECT_NAME/$PROJECT_NAME.srcs/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
+
+# Handle version-dependent output file paths.
+if {$BOARD eq "pynq_z2"} {
+    # Vivado 2020.1 places the HWH file in the .srcs directory
+    exec cp "$PROJECT_NAME/$PROJECT_NAME.srcs/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
+} else {
+    # Newer Vivado versions place the HWH file in the .gen directory
+    exec cp "$PROJECT_NAME/$PROJECT_NAME.gen/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
+}
 exec cp "$PROJECT_NAME/$PROJECT_NAME.runs/impl_1/design_1_wrapper.bit" $PROJECT_NAME/output/design_1.bit
