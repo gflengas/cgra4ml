@@ -13,20 +13,20 @@ class Hardware:
     Class to store static (pre-synthesis) parameters of the accelerator and export them to SystemVerilog and TCL scripts.
     """
     def __init__(
-            self, 
+            self,
             board: str = 'zcu104',
-            processing_elements: (int, int) = (8,24), 
-            frequency_mhz: int = 250, 
-            bits_input: int = 4, 
-            bits_weights: int = 4, 
-            bits_sum: int = 16, 
-            bits_bias: int = 16, 
-            max_batch_size: int = 512, 
-            max_channels_in: int = 512, 
-            max_kernel_size: int = 13, 
-            max_image_size: int = 32, 
+            processing_elements: (int, int) = (8,24),
+            frequency_mhz: int = 250,
+            bits_input: int = 4,
+            bits_weights: int = 4,
+            bits_sum: int = 16,
+            bits_bias: int = 16,
+            max_batch_size: int = 512,
+            max_channels_in: int = 512,
+            max_kernel_size: int = 13,
+            max_image_size: int = 32,
             max_n_bundles: int = 64,
-            ram_weights_depth: int = 512, 
+            ram_weights_depth: int = 512,
             ram_edges_depth: int|None = 288,
             axi_width: int = 64,
             header_width: int = 64,
@@ -40,6 +40,7 @@ class Hardware:
             ):
         """
         Args:
+            board (str, optional): _description_. Defaults to 'zcu104'.
             processing_elements (int, int, optional): _description_. Defaults to (8,24).
             frequency_mhz (int, optional): _description_. Defaults to 250.
             bits_input (int, optional): _description_. Defaults to 4.
@@ -54,15 +55,15 @@ class Hardware:
             ram_edges_depth (int | None, optional): _description_. Defaults to None.
             target_cpu_int_bits (int, optional): _description_. Defaults to 32.
         """
-        
+
         self.board = board
         self.params = locals()
         self.params = {k:self.params[k] for k in self.params if not k == 'self'}
-        
+
         # Validation
         assert bits_input in [1,2,4,8] and bits_weights in [1,2,4,8]
         assert bits_bias  in [8,16,32]
-        
+
         self.ROWS, self.COLS = processing_elements
         self.FREQ   = frequency_mhz
         self.X_BITS = bits_input
