@@ -119,7 +119,7 @@ class Hardware:
         '''
         Exports the hardware parameters to a JSON file.
         '''
-        
+
         with open(path, 'w') as f:
             json.dump(self.params, f, indent=4)
 
@@ -129,7 +129,7 @@ class Hardware:
         '''
         Creates the Hardware object from an exported JSON file.
         '''
-        
+
         with open(path, 'r') as f:
             hw = Hardware(**json.load(f))
         return hw
@@ -145,9 +145,9 @@ class Hardware:
 
         with open('config_tb.svh', 'w') as f:
             f.write(f'''
-`define VALID_PROB {self.VALID_PROB} 
-`define READY_PROB {self.READY_PROB} 
-`define CLK_PERIOD {PERIOD_NS:.1f} 
+`define VALID_PROB {self.VALID_PROB}
+`define READY_PROB {self.READY_PROB}
+`define CLK_PERIOD {PERIOD_NS:.1f}
 `define INPUT_DELAY_NS  {INPUT_DELAY_NS :.1f}ns
 `define OUTPUT_DELAY_NS {OUTPUT_DELAY_NS:.1f}ns
 ''')
@@ -158,7 +158,7 @@ class Hardware:
         with open('config_hw.svh', 'w') as f:
             f.write(f'''
 // Written from Hardware.export()
-                    
+
 `define OR_NEGEDGE(RSTN)    {"or negedge RSTN" if self.ASYNC_RESETN else ""}
 
 `define ROWS                {self.ROWS               :<10}  // PE rows, constrained by resources
@@ -180,8 +180,8 @@ class Hardware:
 `define RAM_EDGES_DEPTH     {self.RAM_EDGES_DEPTH    :<10}  // max (KW * CI * XW), across layers when KW != 1
 `define W_BPT               {self.W_BPT              :<10}  // Width of output integer denoting bytes per transfer
 
-`define DELAY_MUL           3            // constant, for now 
-`define DELAY_W_RAM         2            // constant, for now 
+`define DELAY_MUL           3            // constant, for now
+`define DELAY_W_RAM         2            // constant, for now
 
 `define AXI_WIDTH           {self.AXI_WIDTH          :<10}
 `define HEADER_WIDTH        {self.HEADER_WIDTH       :<10}
@@ -241,7 +241,7 @@ set CONFIG_BASEADDR    0x{self.CONFIG_BASEADDR}
             subprocess.run(["vvp", "build/a.out"])
         if SIM == 'verilator':
             assert subprocess.run([f"./V{self.TB_MODULE}"], cwd="build").returncode == 0
-        
+
         print(f"\n\nSIMULATION TIME: {time.time()-start:.2f} seconds\n\n")
 
 
@@ -253,7 +253,7 @@ set CONFIG_BASEADDR    0x{self.CONFIG_BASEADDR}
             scripts_dir_abspath = self.MODULE_DIR + '/tcl/fpga'
         if board_tcl_abspath is None:
             board_tcl_abspath = f'{scripts_dir_abspath}/{self.board}.tcl'
-        
+
         assert os.path.exists(board_tcl_abspath), f"Board script {board_tcl_abspath} does not exist."
         assert os.path.exists('./config_hw.tcl'), f"./config_hw.tcl does not exist."
 
