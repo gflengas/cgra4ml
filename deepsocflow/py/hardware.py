@@ -94,7 +94,7 @@ class Hardware:
         '''
         | Depth of RAM needed for edge padding.
         |     if k == 1 -> 0
-        |     else ci*xw*(blocks-1) 
+        |     else ci*xw*(blocks-1)
         '''
 
         self.L_MAX                 = int(np.ceil(self.XH_MAX//self.ROWS))
