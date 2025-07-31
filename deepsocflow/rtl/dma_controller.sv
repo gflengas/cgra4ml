@@ -131,9 +131,11 @@ module dma_controller #(
 
   // SRAM rd_en arbitration
   (* mark_debug = "true" *) logic w_ram_rd_en, x_ram_rd_en, w_ram_rd_valid, x_ram_rd_valid;
-  (* mark_debug = "true" *) logic [SRAM_RD_ADDR_WIDTH-1:0] w_ram_rd_addr, x_ram_rd_addr;
+  (* mark_debug = "true" *) logic [SRAM_RD_ADDR_WIDTH-1:0] w_ram_rd_addr_reg, x_ram_rd_addr_reg;
+  logic [SRAM_RD_ADDR_WIDTH-1:0] w_ram_rd_addr_next, x_ram_rd_addr_next;
 
-  assign ram_rd_addr = x_ram_rd_en ? x_ram_rd_addr : w_ram_rd_addr;
+
+  assign ram_rd_addr = x_ram_rd_en ? x_ram_rd_addr_reg : w_ram_rd_addr_reg;
   assign ram_rd_en   = x_ram_rd_en || w_ram_rd_en;
 
   always_ff @(posedge clk) // SRAM has latency = 1, pixels conroller gets priority, valids tell each controller SRAM data belongs to them
@@ -148,7 +150,7 @@ module dma_controller #(
 
   logic en_wt, lc_wt, lc_wp, lc_wb, f_wp, set_n_bundles_w;
   logic [COUNTER_WIDTH-1:0] count_wb;
-  enum  {W_IDLE, W_WAIT_RAM, W_EXEC} w_state, w_state_next;
+  enum  {W_IDLE, W_CALC_ADDR, W_WAIT_RAM, W_EXEC} w_state, w_state_next;
 
   // Increment m_wd_addr
   always_ff @(posedge clk)
@@ -160,10 +162,11 @@ module dma_controller #(
   always_comb begin
     w_state_next = w_state;
     unique case (w_state)
-      W_IDLE    : if ((cfg[A_START][0]))  w_state_next = W_WAIT_RAM;
-      W_WAIT_RAM: if (w_ram_rd_valid)    w_state_next = W_EXEC;
-      W_EXEC    : if (lc_wb)             w_state_next = W_IDLE; // all bundles done, idle
-                  else if (lc_wp)        w_state_next = W_WAIT_RAM; // this bundle done, request next bundle params
+      W_IDLE     : if ((cfg[A_START][0]))  w_state_next = W_CALC_ADDR;
+      W_CALC_ADDR:                       w_state_next = W_WAIT_RAM;
+      W_WAIT_RAM : if (w_ram_rd_valid)    w_state_next = W_EXEC;
+      W_EXEC     : if (lc_wb)             w_state_next = W_IDLE;      // all bundles done, idle
+                   else if (lc_wp)        w_state_next = W_CALC_ADDR; // this bundle done, request next bundle params
     endcase
   end
   always_ff @(posedge clk)
@@ -171,18 +174,20 @@ module dma_controller #(
     else       w_state <= w_state_next;
 
   // State decoding
-  assign w_ram_rd_en   = w_state == W_WAIT_RAM && w_state_next == W_WAIT_RAM; // correction: rd should only be high for 1 cycle.
-  assign w_ram_rd_addr = SRAM_RD_ADDR_WIDTH'(cfg[A_N_BUNDLES_1] - 1 - 32'(count_wb)); // count is decrementing, eg: 10 bundles: 9 - (9,8,7,6...0) = (0,1,2,3...9)
+  assign w_ram_rd_en   = w_state == W_WAIT_RAM && w_state_next == W_WAIT_RAM;
+  assign w_ram_rd_addr_next = SRAM_RD_ADDR_WIDTH'(cfg[A_N_BUNDLES_1] - 1 - 32'(count_wb)); // count is decrementing, eg: 10 bundles: 9 - (9,8,7,6...0) = (0,1,2,3...9)
   assign m_wd_len      = f_wp ? w_bpt_p0 : w_bpt;
   assign m_wd_valid    = w_state == W_EXEC;
   assign en_wt         = m_wd_valid && m_wd_ready;
   assign m_wd_user     = {w_header, f_wp};
 
   always_ff @(posedge clk)
-    if (!rstn)               {w_header, w_bpt_p0, w_bpt} <= 0;
-    else if (w_ram_rd_valid) {w_header, w_bpt_p0, w_bpt} <= {ram_header, ram_w_bpt_p0, ram_w_bpt};
+    if (!rstn)               {w_header, w_bpt_p0, w_bpt, w_ram_rd_addr_reg} <= 0;
+    else begin
+      if (w_ram_rd_valid) {w_header, w_bpt_p0, w_bpt} <= {ram_header, ram_w_bpt_p0, ram_w_bpt};
+      if (w_state == W_CALC_ADDR) w_ram_rd_addr_reg <= w_ram_rd_addr_next;
+    end
 
-  
 
   counter #(.W(COUNTER_WIDTH)) C_WT (.clk(clk), .rstn_g(rstn), .rst_l(w_ram_rd_valid  ), .en(en_wt), .max_in(COUNTER_WIDTH'(32'(ram_max_t)-1    )), .last_clk(lc_wt), .last(), .first(    ), .count(        ));
   counter #(.W(COUNTER_WIDTH)) C_WP (.clk(clk), .rstn_g(rstn), .rst_l(w_ram_rd_valid  ), .en(lc_wt), .max_in(COUNTER_WIDTH'(32'(ram_max_p)-1    )), .last_clk(lc_wp), .last(), .first(f_wp), .count(        ));
@@ -193,16 +198,17 @@ module dma_controller #(
 
   (* mark_debug = "true" *) logic [COUNTER_WIDTH-1:0] count_xb;
   (* mark_debug = "true" *) logic en_xt, lc_xt, lc_xp, lc_xb, f_xp, set_n_bundles_x;
-  (* mark_debug = "true" *) enum  {X_IDLE, X_WAIT_RAM, X_WAIT_WRITE, X_EXEC} x_state, x_state_next;
+  (* mark_debug = "true" *) enum  {X_IDLE, X_CALC_ADDR, X_WAIT_RAM, X_WAIT_WRITE, X_EXEC} x_state, x_state_next;
 
   always_comb begin
     x_state_next = x_state;
     unique case (x_state)
-      X_IDLE      : if (cfg[A_START][0])       x_state_next = X_WAIT_RAM;
+      X_IDLE      : if (cfg[A_START][0])       x_state_next = X_CALC_ADDR;
+      X_CALC_ADDR :                         x_state_next = X_WAIT_RAM;
       X_WAIT_RAM  : if (x_ram_rd_valid)         x_state_next = X_WAIT_WRITE;
       X_WAIT_WRITE: if (cfg[A_BUNDLE_DONE][0]) x_state_next = X_EXEC;
-      X_EXEC      : if (lc_xb)                  x_state_next = X_IDLE; // all bundles done, idle
-                    else if (lc_xp)             x_state_next = X_WAIT_RAM; // this bundle done, request next bundle params
+      X_EXEC      : if (lc_xb)                  x_state_next = X_IDLE;      // all bundles done, idle
+                    else if (lc_xp)             x_state_next = X_CALC_ADDR; // this bundle done, request next bundle params
     endcase
   end
   always_ff @(posedge clk)
@@ -211,7 +217,7 @@ module dma_controller #(
 
   // State decoding
   assign x_ram_rd_en   = x_state == X_WAIT_RAM && x_state_next == X_WAIT_RAM;
-  assign x_ram_rd_addr = SRAM_RD_ADDR_WIDTH'(cfg[A_N_BUNDLES_1] - 1 - 32'(count_xb)); // eg: 10 bundles: 9 - (9,8,7,6...0) = (0,1,2,3...9)
+  assign x_ram_rd_addr_next = SRAM_RD_ADDR_WIDTH'(cfg[A_N_BUNDLES_1] - 1 - 32'(count_xb)); // eg: 10 bundles: 9 - (9,8,7,6...0) = (0,1,2,3...9)
   assign m_xd_len      = f_xp ? x_bpt_p0 : x_bpt;
   assign m_xd_valid    = x_state == X_EXEC;
   assign en_xt         = m_xd_valid && m_xd_ready;
@@ -224,8 +230,11 @@ module dma_controller #(
     else if (lc_xt)          m_xd_addr <= m_xd_addr + AXI_ADDR_WIDTH'(m_xd_len); // increment address every p (after t transfers)
 
   always_ff @(posedge clk)
-    if (!rstn)               {x_header, x_bpt_p0, x_bpt} <= 0;
-    else if (x_ram_rd_valid) {x_header, x_bpt_p0, x_bpt} <= {ram_header, ram_x_bpt_p0, ram_x_bpt};
+    if (!rstn)               {x_header, x_bpt_p0, x_bpt, x_ram_rd_addr_reg} <= 0;
+    else begin
+      if (x_ram_rd_valid) {x_header, x_bpt_p0, x_bpt} <= {ram_header, ram_x_bpt_p0, ram_x_bpt};
+      if (x_state == X_CALC_ADDR) x_ram_rd_addr_reg <= x_ram_rd_addr_next;
+    end
 
   (* mark_debug = "true" *) logic [COUNTER_WIDTH-1:0] count_xt_monitor;
   (* mark_debug = "true" *) logic count_xt_last_monitor;
