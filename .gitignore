@@ -1,13 +1,13 @@
+# =================================================================
+# General Cache and Temporary Files
+# =================================================================
 old/
 __pycache__
-
 temp/
 
-run/work/*
-
-run/asic/*
-!deepsocflow/asic/reports
-
+# =================================================================
+# DeepSoCFlow Specific Files
+# =================================================================
 *.pickle
 *.jou
 *.log
@@ -20,15 +20,19 @@ deepsocflow/test/xsc*
 deepsocflow/test/obj_dir
 deepsocflow/test/models
 deepsocflow/test/temp
-
 deepsocflow/test/py/*
+deepsocflow/asic/reports # Note: This was likely meant to be an exception, see below.
 
-.svls.toml
-.svlint.toml
+# =================================================================
+# Run/Work Directory Rules
+#
+# Ignore all contents of run/work recursively,
+# EXCEPT for one specific file.
+# =================================================================
+run/work/**
+!run/work/vitis_flow_pynq.tcl
 
-**/vectors/*
-run/work/build/*
-run/work/dsf*
+# Ignore other specific run directories by name
 run/work_resnet
 run/work_temp
 run/work_ccd
@@ -37,16 +41,14 @@ run/work_llm
 run/work_example
 run/work_resnet18
 run/work_pointnet
-run/work/project_1
 
-# Vivado and verilator sim
-run/work/.Xil*
-run/work/xsim/
-run/work/xsim/*
-run/work/verilator-sim/
-run/work/verilator-sim/*
+# Ignore ASIC simulation output, but make an exception for reports
+run/asic/*
+!run/asic/reports/
 
-# Distribution / packaging
+# =================================================================
+# Build and Distribution Artifacts
+# =================================================================
 .Python
 build/
 develop-eggs/
@@ -67,18 +69,23 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
-# Sphinx documentation
+# =================================================================
+# Documentation
+#
+# Ignore all docs except the source ReStructuredText files and config
+# =================================================================
 docs/**
-!docs/source
+!docs/source/
 docs/source/**
 !docs/source/conf.py
 !docs/source/*.rst
 
-# VSCode
-settings.json
-.vscode
+# =================================================================
+# IDE and Tooling Config
+# =================================================================
+.svls.toml
+.svlint.toml
+.vscode/
