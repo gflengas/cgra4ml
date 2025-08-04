@@ -31,7 +31,7 @@ deepsocflow/asic/reports # Note: This was likely meant to be an exception, see b
 # =================================================================
 run/work/**
 !run/work/vitis_flow_pynq.tcl
-
+!run/work/README.md
 # Ignore other specific run directories by name
 run/work_resnet
 run/work_temp
