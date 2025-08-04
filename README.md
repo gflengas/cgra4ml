@@ -79,7 +79,7 @@ The `pynq_z2.tcl` file is used to generate the platform for the PYNQ-Z2 board.
 
 The `vivado.tcl` file is used to generate the Vivado project for the PYNQ-Z2 board. It needed some big updates in order to be working with both PYNQ-Z2 and ZCU boards. 
 
-Refactored the Vivado TCL script to use **SmartConnect** for the PYNQ-Z2 board, adapting the AXI interconnect and address mapping. Updated the address range and offset for the `axi_cgra4ml_0` IP core. Added logic to copy the HWH file from either .srcs (Vivado 2020.1) or .gen (newer versions).
+Refactored the Vivado TCL script to use **SmartConnect** for the PYNQ-Z2 board, adapting the AXI interconnect and address mapping. This was done in order the bridge AXI3 that is supported by the PYNQ-Z2 board with the AXI4 that is supported by the CGRA4ML IP core. Updated the address range and offset for the `axi_cgra4ml_0` IP core. Added logic to copy the HWH file from either .srcs (Vivado 2020.1) or .gen (newer versions).
 
 
 ### 3. Updating the Hardware class 
