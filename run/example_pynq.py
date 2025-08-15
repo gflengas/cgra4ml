@@ -153,7 +153,7 @@ Specify Hardware
 hw = Hardware (                          # Alternatively: hw = Hardware.from_json('hardware.json')
         board               = 'pynq_z2'  , # Target board
         processing_elements = (4, 8)   , # (rows, columns) of multiply-add units - Reduced to help with timing
-        frequency_mhz       = 100      , # A lower frequency is more likely to meet timing on the PYNQ-Z2
+        frequency_mhz       = 80      , # A lower frequency is more likely to meet timing on the PYNQ-Z2
         bits_input          = 4        , # bit width of input pixels and activations
         bits_weights        = 4        , # bit width of weights
         bits_sum            = 20       , # bit width of accumulator
