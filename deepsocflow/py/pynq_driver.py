@@ -1,5 +1,5 @@
-import pynq
-import numpy as np
+import pynq  # pyright: ignore[reportMissingImports]
+import numpy as np  # pyright: ignore[reportMissingImports]
 import json
 import os
 
@@ -108,6 +108,9 @@ class DeepSoCFlowPYNQ:
             'A_WEIGHTS_BASE': 0x7,
             'A_BUNDLE_DONE' : 0x8,
             'A_N_BUNDLES_1' : 0x9,
+            'A_W_DONE'      : 0xA,
+            'A_X_DONE'      : 0xB,
+            'A_O_DONE'      : 0xC,
             'A_PARAMS_BASE' : 16, # Start offset for parameter BRAM, as per C-runtime
         }
 
@@ -193,11 +196,19 @@ class DeepSoCFlowPYNQ:
         self.mmio.write(self.REG_OFFSETS['A_WEIGHTS_BASE'] * 4, self.mem['w'].physical_address)
         self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
         self.mmio.write(self.REG_OFFSETS['A_N_BUNDLES_1'] * 4, self.defines['N_BUNDLES'])
+        # Initialize the status registers that were missing (critical!)
+        self.mmio.write(self.REG_OFFSETS['A_W_DONE'] * 4, 0)
+        self.mmio.write(self.REG_OFFSETS['A_X_DONE'] * 4, 0)
+        self.mmio.write(self.REG_OFFSETS['A_O_DONE'] * 4, 0)
         print("Register configuration complete.")
         print("Model setup finished.")
 
     def model_run(self, input_data=None):
         print("\n--- Starting Model Run ---")
+        # Debug: Check if input data is loaded correctly
+        print(f"DEBUG: Input data (first 16 bytes): {self.mem['x'][:16]}")
+        print(f"DEBUG: Weight data (first 16 bytes): {self.mem['w'][:16]}")
+        print(f"DEBUG: Bias data (first 8 values): {self.mem['b'][:8]}")
 
         if input_data is not None:
             np.copyto(self.mem['x'], np.frombuffer(input_data, dtype=np.int8))
@@ -206,47 +217,119 @@ class DeepSoCFlowPYNQ:
         config_base = self.mmio
         ocm_bank = 1 # Will be flipped to 0 on first iteration
 
+        # Check initial state before starting
+        print("--- Initial Hardware State ---")
+        for bank in [0, 1]:
+            done_write = config_base.read((self.REG_OFFSETS['A_DONE_WRITE'] + bank) * 4)
+            done_read = config_base.read((self.REG_OFFSETS['A_DONE_READ'] + bank) * 4)
+            print(f"Bank {bank}: DONE_WRITE={done_write}, DONE_READ={done_read}")
+        
+        w_done = config_base.read(self.REG_OFFSETS['A_W_DONE'] * 4)
+        x_done = config_base.read(self.REG_OFFSETS['A_X_DONE'] * 4)
+        o_done = config_base.read(self.REG_OFFSETS['A_O_DONE'] * 4)
+        start_val = config_base.read(self.REG_OFFSETS['A_START'] * 4)
+        print(f"Status: START={start_val}, W_DONE={w_done}, X_DONE={x_done}, O_DONE={o_done}")
+
+        # Start the accelerator ONCE at the beginning (like C runtime)
+        config_base.write(self.REG_OFFSETS['A_START'] * 4, 1)
+        print("Set A_START=1")
+        
+        # Give hardware a moment to initialize
+        import time
+        time.sleep(0.1)
+        
+        # Check state after start
+        print("--- State After A_START=1 ---")
+        for bank in [0, 1]:
+            done_write = config_base.read((self.REG_OFFSETS['A_DONE_WRITE'] + bank) * 4)
+            done_read = config_base.read((self.REG_OFFSETS['A_DONE_READ'] + bank) * 4)
+            print(f"Bank {bank}: DONE_WRITE={done_write}, DONE_READ={done_read}")
+        
+        w_done = config_base.read(self.REG_OFFSETS['A_W_DONE'] * 4)
+        x_done = config_base.read(self.REG_OFFSETS['A_X_DONE'] * 4)
+        o_done = config_base.read(self.REG_OFFSETS['A_O_DONE'] * 4)
+        print(f"Status: W_DONE={w_done}, X_DONE={x_done}, O_DONE={o_done}")
+
         for ib, b in enumerate(self.bundles):
             print(f"\n--- Processing Bundle {ib} ---")
-            print(f"  Bundle Parameters: {b}")
+            
+            # Add detailed bundle configuration for all bundles
+            if ib in [0, 1, 2, 3, 4, 5, 6]:
+                print(f"Bundle {ib} Config: p={b['p']}, t={b['t']}, n={b['n']}, l={b['l']}, w_kw2={b['w_kw2']}")
+                print(f"Bundle {ib} Dims: h={b['h']}, w={b['w']}, co={b['co']}, coe={b['coe']}")
+                print(f"Bundle {ib} Bias: is_bias={b['is_bias']}, b_offset={b['b_offset']}")
             
             is_last_bundle = (ib == len(self.bundles) - 1)
             o_buf = self.mem['y'] if is_last_bundle else self.mem['out_buffers'][b['out_buffer_idx']]
 
-            # Create a temporary buffer to reassemble the full output image for this layer
-            nhwc_buf = np.zeros(b['n'] * b['h'] * b['oc'], dtype=np.int32)
+            # Allocate separate buffers for pre-stride accumulation and post-stride results
+            nhwc_buf = np.zeros(b['n'] * b['ch'] * b['cw'] * b['co'], dtype=np.int32)
+            p_pass_buf = np.zeros(b['n'] * b['h'] * b['w'] * b['co'], dtype=np.int32) if b['p'] > 1 else None
 
-            # This loop structure implements the OCM double-buffering handshake
-            # It is a simplified version of the more complex C-runtime loop.
-            for l in range(b['l']):
-                for p in range(b['p']):
-                    print(f"  Tile {l}, Pass {p}")
-
-                    ocm_bank = 1 - ocm_bank # Flip bank for double buffering (0->1 or 1->0)
-
-                    # Start the accelerator
-                    config_base.write(self.REG_OFFSETS['A_START'] * 4, 1)
-                    
-                    # Wait for the accelerator to finish writing to the current OCM bank
-                    while config_base.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4) == 0:
-                        pass
-                    
-                    config_base.write(self.REG_OFFSETS['A_START'] * 4, 0)
-                    
-                    # Invalidate the cache for the OCM buffer so we get the new data from the PL
-                    y_tile_ocm = self.mem['ocm'][ocm_bank]
-                    y_tile_ocm.invalidate()
-                    
-                    print(f"    Processing tile {l} on CPU for pass {p}...")
-                    self.process_tile_py(y_tile_ocm, nhwc_buf, b, l, 0, p)
-                    
-                    # Reset the hardware's DONE_WRITE flag
-                    config_base.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
-                    # Signal to hardware that the CPU is done reading from this OCM bank
-                    config_base.write((self.REG_OFFSETS['A_DONE_READ'] + ocm_bank) * 4, 1)
+            for p in range(b['p']):
+                for t in range(b['t']):
+                    for n in range(b['n']):
+                        for l in range(b['l']):
+                            for w_kw2 in range(b['w_kw2']):
+                                # print(f"  > B{ib} P{p} T{t} N{n} L{l} W_KW2:{w_kw2} | Bank: {1-ocm_bank}")
+                                ocm_bank = 1 - ocm_bank # Flip bank
+                                
+                                # Check current state
+                                done_write = config_base.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4)
+                                # print(f"    About to wait for DONE_WRITE on bank {ocm_bank}")
+                                # print(f"    Current DONE_WRITE[{ocm_bank}] = {done_write}")
+                                
+                                if done_write == 1:
+                                    # print(f"    DONE_WRITE[{ocm_bank}] is already 1! Proceeding immediately.")
+                                    pass
+                                else:
+                                    # Wait for the accelerator to finish writing to the current OCM bank
+                                    # print(f"    ... Waiting for accelerator to write to bank {ocm_bank}")
+                                    timeout_counter = 0
+                                    while config_base.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4) == 0:
+                                        timeout_counter += 1
+                                        if timeout_counter % 10 == 0:  # Print debug every 10 iterations
+                                            w_done = config_base.read(self.REG_OFFSETS['A_W_DONE'] * 4)
+                                            x_done = config_base.read(self.REG_OFFSETS['A_X_DONE'] * 4)
+                                            o_done = config_base.read(self.REG_OFFSETS['A_O_DONE'] * 4)
+                                            print(f"      - Still waiting... Internal states: W_DONE={w_done}, X_DONE={x_done}, O_DONE={o_done}")
+                                        time.sleep(0.01)  # Shorter sleep for faster polling
+                                        if timeout_counter > 1000:  # Timeout after 10 seconds
+                                            print(f"ERROR: Timeout waiting for DONE_WRITE on bank {ocm_bank}")
+                                            break
+                                    # print(f"    ... Accelerator finished writing to bank {ocm_bank}")
+                                
+                                # Clear the DONE_WRITE flag immediately (matching C runtime)
+                                config_base.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
+                                # print(f"    Cleared DONE_WRITE[{ocm_bank}]")
+                                
+                                # Process the data from OCM
+                                y_tile_ocm = self.mem['ocm'][ocm_bank]
+                                y_tile_ocm.invalidate()
+                                
+                                w_last = (b['kw'] // 2 + 1) if (w_kw2 == b['w_kw2'] - 1) else 1
+                                self.process_tile_py(y_tile_ocm, nhwc_buf, p_pass_buf, b, l, w_kw2, w_last, n, p, t)
+                                
+                                # Signal to hardware that the CPU is done reading from this OCM bank
+                                config_base.write((self.REG_OFFSETS['A_DONE_READ'] + ocm_bank) * 4, 1)
+                                # print(f"    ... Signaled CPU done reading bank {ocm_bank}")
 
             # After all passes and tiles, perform pooling/packing on the assembled buffer
             self._perform_pooling_and_packing(nhwc_buf, o_buf, b)
+            
+            # Debug Bundle outputs AFTER processing is complete for ALL bundles
+            print(f"\n--- Bundle {ib} Output Debug ---")
+            if is_last_bundle:
+                print(f"Bundle {ib} FINAL output (first 10): {self.mem['y'][:10]}")
+            else:
+                # Unpack the output buffer to see what the next bundle will receive as input
+                x_bits = 1 << self.defines['X_BITS_L2']
+                packed_data = self.mem['out_buffers'][b['out_buffer_idx']][:50]  # First 50 bytes
+                unpacked = unpack_bytes_into_words(packed_data, x_bits)
+                print(f"Bundle {ib} output (first 20): {unpacked[:20]}")
+                
+                # Also show NHWC buffer before packing for debugging
+                print(f"Bundle {ib} NHWC buffer (first 20): {nhwc_buf[:20]}")
             
             # Signal that the entire bundle is done
             config_base.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
@@ -254,102 +337,190 @@ class DeepSoCFlowPYNQ:
         print("\n--- Model Run Finished ---")
         return self._get_final_output()
 
-    def process_tile_py(self, y_tile_in, nhwc_buf, b, il, n, p):
+    def process_tile_py(self, y_tile_in, nhwc_buf, p_pass_buf, b, il, iw_kw2, w_last, n, p, t):
         """
-        Processes a single tile of output data from the OCM.
-        This function's main job is to apply bias and activation, then place
-        the resulting data into the correct location in the larger NHWC buffer.
-        It does NOT perform pooling.
+        Enhanced version with comprehensive debugging
         """
         # --- DEBUG PRINT: Verify raw OCM input to CPU ---
-        print(f"    DEBUG: Raw OCM data entering process_tile_py (B:{b['ib']}, L:{il}, P:{p}): {y_tile_in[:32]}")
+        if b['ib'] == 0 and p == 0 and t == 0 and n == 0 and il == 0 and iw_kw2 == 0:
+            print(f"    DEBUG Bundle 0 First Tile: Raw OCM data: {y_tile_in[:16]}")
+        
+        # Add debugging for Bundle 6 (final bundle)
+        if b['ib'] == 6:
+            print(f"    DEBUG B{b['ib']}: P{p} T{t} N{n} L{il} W_KW2{iw_kw2}")
+            print(f"    DEBUG B{b['ib']}: Raw OCM data: {y_tile_in[:16]}")
+        
+        # Add debugging for Bundle 5 (input to Bundle 6)
+        if b['ib'] == 5:
+            print(f"    DEBUG B{b['ib']}: P{p} T{t} N{n} L{il} W_KW2{iw_kw2}")
+            print(f"    DEBUG B{b['ib']}: Raw OCM data: {y_tile_in[:16]}")
         
         pe_rows = self.defines['PE_ROWS']
-        pe_cols = self.defines['PE_COLS']
         x_bits_l2 = self.defines['X_BITS_L2']
         x_bits = 1 << x_bits_l2
 
-        y_tile = y_tile_in.copy().reshape(pe_rows, pe_cols)
-
-        # Determine the number of valid channels to process for this specific pass
-        p_offset = p * self.defines['PE_COLS']
-        valid_channels_in_pass = min(b['coe'], b['oc'] - p_offset)
+        h, w, co = b['h'], b['w'], b['co']
+        ch, cw = b['ch'], b['cw']
         
-        # --- Per-Pixel Processing (mimicking the C-runtime loop) ---
-        for r_idx in range(pe_rows):
-            oh = il * pe_rows + r_idx
-            if oh >= b['h']: continue
+        sram_addr = 0
+        processed_values = []  # Debug: collect some processed values
+        
+        for icoe in range(b['coe']):
+            i_bias = b['b_offset'] + b['coe'] * t + icoe
             
-            for c_idx in range(valid_channels_in_pass):
-                oc = p_offset + c_idx
-                if oc >= b['oc']: continue
+            for iw_last in range(w_last):
+                for ir in range(pe_rows):
+                    oh = il * pe_rows + ir
+                    ow = iw_kw2 + iw_last
+                    oc_val = b['coe'] * t + icoe
+                    
+                    if oh >= h or ow >= w or oc_val >= co:
+                        sram_addr += 1
+                        continue
+
+                    val = y_tile_in[sram_addr].astype(np.int64)
+                    raw_val = val  # Store for debugging
+                    sram_addr += 1
+
+                    if b['p'] > 1:
+                        nhwc_idx_pre_stride = (n * h * w + oh * w + ow) * co + oc_val
+                        if p < b['p'] - 1:
+                            if p == 0:
+                                p_pass_buf[nhwc_idx_pre_stride] = val
+                            else:
+                                p_pass_buf[nhwc_idx_pre_stride] += val
+                            # Debug multi-pass for Bundle 6
+                            if b['ib'] == 6 and nhwc_idx_pre_stride < 10:
+                                print(f"    DEBUG B{b['ib']} P{p}: Stored nhwc_idx={nhwc_idx_pre_stride}, val={val}")
+                            continue
+                        else:
+                            accumulated_val = p_pass_buf[nhwc_idx_pre_stride]
+                            val += accumulated_val
+                            # Debug multi-pass for Bundle 6
+                            if b['ib'] == 6 and nhwc_idx_pre_stride < 10:
+                                print(f"    DEBUG B{b['ib']} P{p}: nhwc_idx={nhwc_idx_pre_stride}, raw={raw_val}, accumulated={accumulated_val}, final_sum={val}")
                 
-                val = y_tile[r_idx, c_idx].astype(np.int64)
+                    if (oh - b['csh_shift']) % b['csh'] != 0 or \
+                       (ow - b['csw_shift']) % b['csw'] != 0:
+                        continue
 
-                # --- Apply Bias ---
-                if b['is_bias'] and p == (b['p'] - 1):
-                    bias_val = self.mem['b'][b['b_offset'] + oc]
-                    val = (val << b['b_val_shift']) + (bias_val.astype(np.int64) << b['b_bias_shift'])
+                    final_oh = (oh - b['csh_shift']) // b['csh']
+                    final_ow = (ow - b['csw_shift']) // b['csw']
 
-                # --- Core Activation (ca_) ---
-                if b['ca_nzero']:
-                    if val >= 0: val = val << b['ca_pl_scale']
+                    if b['is_bias']:
+                        bias_val = self.mem['b'][i_bias]
+                        val = (val << b['b_val_shift']) + (bias_val.astype(np.int64) << b['b_bias_shift'])
                     
-                    float_shifted = float(val) / (2**b['ca_shift'])
-                    val = np.around(float_shifted).astype(np.int64)
-                    
+                    # --- Core Activation (ca_) ---
+                    val_before_activation = val
+                    if val < 0: val = val if b['ca_nzero'] else 0
+                    else: val = val << b['ca_pl_scale']
+                    val = self.shift_round(val, b['ca_shift'])
                     min_clip = -(2**(x_bits - b['ca_pl_scale'] - 1))
                     max_clip = (2**(x_bits - 1)) - 1
                     val = np.clip(val, min_clip, max_clip)
 
-                # --- Residual Add ---
-                nhwc_idx = n * b['h'] * b['oc'] + oh * b['oc'] + oc
-                if b['add_in_buffer_idx'] != -1:
-                    val += self.mem['add_buffers'][b['add_in_buffer_idx']][nhwc_idx]
-
-                    # --- Adder Activation (aa_) ---
-                    if b['aa_nzero']:
-                        if val >= 0: val = val << b['aa_pl_scale']
+                    # --- Residual Add ---
+                    if b['add_in_buffer_idx'] != -1:
+                        add_idx = (n * ch * cw + final_oh * cw + final_ow) * co + oc_val
+                        val += self.mem['add_buffers'][b['add_in_buffer_idx']][add_idx]
                         
-                        float_shifted = float(val) / (2**b['aa_shift'])
-                        val = np.around(float_shifted).astype(np.int64)
-
+                        # --- Adder Activation (aa_) ---
+                        if val < 0: val = val if b['aa_nzero'] else 0
+                        else: val = val << b['aa_pl_scale']
+                        val = self.shift_round(val, b['aa_shift'])
                         min_clip = -(2**(x_bits - b['aa_pl_scale'] - 1))
                         max_clip = (2**(x_bits - 1)) - 1
                         val = np.clip(val, min_clip, max_clip)
-                
-                # Place the final processed value into the correct position
-                nhwc_buf[nhwc_idx] = val
+
+                    final_nhwc_idx = (n * ch * cw + final_oh * cw + final_ow) * co + oc_val
+                    nhwc_buf[final_nhwc_idx] = val
+                    
+                    # Enhanced debugging for Bundle 6 final values
+                    if b['ib'] == 6 and final_nhwc_idx < 10:
+                        print(f"    DEBUG B{b['ib']}: nhwc_idx={final_nhwc_idx}, raw={raw_val}, before_act={val_before_activation}, final={val}")
+
+                    # Debug: collect first few processed values from Bundle 0
+                    if b['ib'] == 0 and len(processed_values) < 8:
+                        processed_values.append((raw_val, val, oh, ow, oc_val))
+        
+        # Debug print for Bundle 0
+        if b['ib'] == 0 and p == 0 and t == 0 and n == 0 and il == 0 and iw_kw2 == 0 and processed_values:
+            print(f"    DEBUG Bundle 0 Processing: raw->processed values: {processed_values[:4]}")
+
+    def shift_round(self, n, s):
+        """
+        Implements the exact C runtime shift_round behavior:
+        shift_round(n, s) = (((n) + ((s)>0 ? (1<<((s)-1)) - (~((n)>>(s))&1) : 0)) >> s)
+        """
+        if s <= 0:
+            return n >> s if s < 0 else n
+        
+        # Calculate the rounding adjustment
+        round_adjust = (1 << (s - 1)) - (~((n >> s) & 1) & 1)
+        return (n + round_adjust) >> s
+
+    def div_round(self, a, b):
+        """
+        Implements the exact C runtime div_round behavior:
+        div_round(a, b) = (((a)+((b)/2) - (~((b)|(a)/(b)) &1))/(b))
+        """
+        return ((a + (b // 2) - (~((b | (a // b)) & 1) & 1)) // b)
+    
+    def quant_lrelu(self, x, nzero, shift, pl_scale, x_bits):
+        """
+        Implements the exact C runtime quant_lrelu behavior
+        """
+        x = x if (x < 0 and nzero) or (x >= 0) else 0  # Handle negative values
+        if x >= 0:
+            x = x << pl_scale
+        x = self.shift_round(x, shift)
+        min_clip = -(1 << (x_bits - pl_scale - 1))
+        max_clip = (1 << (x_bits - 1)) - 1
+        return np.clip(x, min_clip, max_clip)
 
     def _perform_pooling_and_packing(self, nhwc_buf, o_buf, b):
         """
         Performs the final pooling, flattening, and packing operations on the
         fully assembled NHWC buffer for a bundle.
         """
-        # If the bundle was a flatten layer, there is no 2D structure for pooling.
-        # The output is already the flattened data.
         if b.get('is_flatten', False):
-            processed_data = nhwc_buf
+            valid_data_size = b['n'] * b['ch'] * b['cw'] * b['co']
+            processed_data = nhwc_buf[:valid_data_size]
         else:
-            # Reshape the flat NHWC buffer into a 2D image representation (height x channels)
-            img = nhwc_buf.reshape(b['h'], b['oc'])
+            # Reshape based on post-stride dimensions, which are now correctly
+            # stored in the dense nhwc_buf.
+            valid_data_size = b['n'] * b['ch'] * b['cw'] * b['co']
+            img = nhwc_buf[:valid_data_size].reshape(b['n'], b['ch'], b['cw'], b['co'])
 
-            # --- Perform Pooling on the full image ---
             if b['pool'] != 'POOL_NONE':
                 pooled_rows = b['oh']
                 pooled_cols = b['ow']
-                pooled_img = np.zeros((pooled_rows, pooled_cols), dtype=np.int32)
+                pooled_img = np.zeros((b['n'], pooled_rows, pooled_cols, b['co']), dtype=np.int32)
                 
                 for r in range(pooled_rows):
                     for c in range(pooled_cols):
                         r_start, c_start = r * b['psh'], c * b['psw']
                         r_end, c_end = r_start + b['pkh'], c_start + b['pkw']
-                        window = img[r_start:r_end, c_start:c_end]
+                        window = img[:, r_start:r_end, c_start:c_end, :]
                         
                         if b['pool'] == 'POOL_MAX':
-                            pooled_img[r, c] = np.max(window)
+                            pooled_img[:, r, c, :] = np.max(window, axis=(1, 2))
                         elif b['pool'] == 'POOL_AVG':
-                            pooled_img[r, c] = np.mean(window).astype(np.int32)
+                            # Calculate sum first, then use div_round like C runtime
+                            window_sum = np.sum(window, axis=(1, 2))
+                            count = window.shape[1] * window.shape[2]  # window size
+                            avg_val = np.array([self.div_round(int(s), count) for s in window_sum.flatten()])
+                            avg_val = avg_val.reshape(window_sum.shape)
+                            
+                            # Apply activation function like C runtime does
+                            x_bits = 1 << self.defines['X_BITS_L2']
+                            activated_val = np.array([
+                                self.quant_lrelu(int(val), b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'], x_bits)
+                                for val in avg_val.flatten()
+                            ]).reshape(avg_val.shape)
+                            
+                            pooled_img[:, r, c, :] = activated_val
                 
                 processed_data = pooled_img
             else:
@@ -397,14 +568,31 @@ class DeepSoCFlowPYNQ:
             float_words /= (1 << softmax_frac)
             float_words -= softmax_max_f
             
-            # Now apply the softmax exponentiation
-            exp_values = np.exp(float_words)
-            sum_exp_values = np.sum(exp_values)
-            
-            if sum_exp_values != 0:
-                final_output = exp_values / sum_exp_values
+            # Reshape to apply softmax along the channel axis, mimicking the C-runtime.
+            # The C-runtime applies softmax per-pixel, over the channel dimension.
+            num_classes = last_bundle['co']
+            if num_classes == 0:
+                final_output = float_words # Avoid division by zero
             else:
-                final_output = exp_values
+                num_vectors = last_bundle['o_words'] // num_classes
+                
+                if num_vectors * num_classes != last_bundle['o_words']:
+                    # Fallback for unexpected shapes, though this indicates a config issue.
+                    exp_values = np.exp(float_words)
+                    sum_exp_values = np.sum(exp_values)
+                    final_output = exp_values / sum_exp_values if sum_exp_values != 0 else exp_values
+                else:
+                    valid_words = float_words[:last_bundle['o_words']]
+                    reshaped_words = valid_words.reshape((num_vectors, num_classes))
+
+                    exp_values = np.exp(reshaped_words)
+                    sum_exp_values = np.sum(exp_values, axis=1, keepdims=True)
+
+                    # Avoid division by zero with a more robust approach
+                    # Set a minimum threshold to avoid numerical issues
+                    sum_exp_values = np.maximum(sum_exp_values, 1e-10)
+                    final_output_reshaped = exp_values / sum_exp_values
+                    final_output = final_output_reshaped.flatten()
         else:
             final_output = final_output_words
 
