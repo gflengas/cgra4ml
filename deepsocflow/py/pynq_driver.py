@@ -120,29 +120,99 @@ class DeepSoCFlowPYNQ:
     def _allocate_memory(self):
         print("Allocating memory buffers...")
         defs = self.defines
+        
+        # Calculate the total size of the Memory_st structure (in bytes)
+        # Based on the C structure layout:
         y_type = self._str_to_dtype[defs['Y_TYPE_str']]
         b_type = self._str_to_dtype[defs['B_TYPE_str']]
         o_type = self._str_to_dtype[defs['O_TYPE_str']]
-
-        # --- Fix: Allocate OCM as int32 to match sign-extended DMA writes ---
-        print("  > NOTE: Allocating OCM with dtype=np.int32 to match HW DMA behavior.")
-        self.mem['ocm'] = pynq.allocate(shape=(2, defs['PE_COLS'] * defs['PE_ROWS']), dtype=np.int32)
-        # -----------------------------------------------------------------------
         
-        self.mem['nhwc'] = pynq.allocate(shape=(defs['NHWC_WORDS'],), dtype=np.int32)
-        self.mem['out_buffers'] = pynq.allocate(shape=(defs['N_OUT_BUF'], defs['O_BYTES_MAX']), dtype=np.int8)
-        self.mem['w'] = pynq.allocate(shape=(defs['W_BYTES'],), dtype=np.int8)
-        self.mem['b'] = pynq.allocate(shape=(defs['B_WORDS'],), dtype=b_type)
-        self.mem['x'] = pynq.allocate(shape=(defs['X_BYTES'],), dtype=np.int8)
-        self.mem['y'] = pynq.allocate(shape=(defs['O_WORDS'],), dtype=o_type)
+        # Calculate sizes in bytes for each component
+        ocm_size = 2 * defs['PE_COLS'] * defs['PE_ROWS'] * np.dtype(y_type).itemsize
+        nhwc_size = defs['NHWC_WORDS'] * 4  # int32
+        out_buffers_size = defs['N_OUT_BUF'] * defs['O_BYTES_MAX']
+        w_size = defs['W_BYTES']
+        b_size = defs['B_WORDS'] * np.dtype(b_type).itemsize
+        x_size = defs['X_BYTES']
+        y_size = defs['O_WORDS'] * np.dtype(o_type).itemsize
+        add_buffers_size = defs['N_ADD_BUF'] * defs['NHWC_WORDS'] if defs['N_ADD_BUF'] > 0 else 0
         
+        # Calculate total size with alignment padding
+        total_size = (ocm_size + nhwc_size + out_buffers_size + 
+                    w_size + b_size + x_size + y_size + add_buffers_size)
+        
+        # Add some padding for alignment (round up to 4KB boundary)
+        total_size = ((total_size + 4095) // 4096) * 4096
+        
+        print(f"Allocating single contiguous buffer of {total_size} bytes...")
+        
+        # Allocate one large contiguous buffer (as uint8 for byte-level access)
+        self.mem_base = pynq.allocate(shape=(total_size,), dtype=np.uint8, cacheable=False)
+        
+        print(f"Memory base physical address: 0x{self.mem_base.physical_address:08x}")
+        
+        # Store physical addresses separately
+        self.physical_addresses = {}
+        
+        # Create views into this buffer at the correct offsets (matching C struct layout)
+        offset = 0
+        
+        # OCM banks [2][PE_COLS*PE_ROWS] - Y_TYPE (typically int16)
+        ocm_elements_per_bank = defs['PE_COLS'] * defs['PE_ROWS']
+        self.mem['ocm'] = []
+        for i in range(2):
+            ocm_view = self.mem_base[offset:offset + ocm_elements_per_bank * np.dtype(y_type).itemsize]
+            self.mem['ocm'].append(ocm_view.view(dtype=y_type).reshape(ocm_elements_per_bank))
+            self.physical_addresses[f'ocm_{i}'] = self.mem_base.physical_address + offset
+            offset += ocm_elements_per_bank * np.dtype(y_type).itemsize
+            print(f"OCM Bank {i} physical address: 0x{self.physical_addresses[f'ocm_{i}']:08x}")
+        
+        # NHWC buffer [NHWC_WORDS] - int32
+        nhwc_view = self.mem_base[offset:offset + defs['NHWC_WORDS'] * 4]
+        self.mem['nhwc'] = nhwc_view.view(dtype=np.int32).reshape(defs['NHWC_WORDS'])
+        self.physical_addresses['nhwc'] = self.mem_base.physical_address + offset
+        offset += defs['NHWC_WORDS'] * 4
+        
+        # Out buffers [N_OUT_BUF][O_BYTES_MAX] - int8
+        out_buffers_view = self.mem_base[offset:offset + defs['N_OUT_BUF'] * defs['O_BYTES_MAX']]
+        self.mem['out_buffers'] = out_buffers_view.view(dtype=np.int8).reshape(defs['N_OUT_BUF'], defs['O_BYTES_MAX'])
+        self.physical_addresses['out_buffers'] = self.mem_base.physical_address + offset
+        offset += defs['N_OUT_BUF'] * defs['O_BYTES_MAX']
+        
+        # Weights [W_BYTES] - int8
+        w_view = self.mem_base[offset:offset + defs['W_BYTES']]
+        self.mem['w'] = w_view.view(dtype=np.int8).reshape(defs['W_BYTES'])
+        self.physical_addresses['w'] = self.mem_base.physical_address + offset  # Store physical address separately
+        offset += defs['W_BYTES']
+        
+        # Biases [B_WORDS] - B_TYPE
+        b_view = self.mem_base[offset:offset + defs['B_WORDS'] * np.dtype(b_type).itemsize]
+        self.mem['b'] = b_view.view(dtype=b_type).reshape(defs['B_WORDS'])
+        self.physical_addresses['b'] = self.mem_base.physical_address + offset
+        offset += defs['B_WORDS'] * np.dtype(b_type).itemsize
+        
+        # Input [X_BYTES] - int8
+        x_view = self.mem_base[offset:offset + defs['X_BYTES']]
+        self.mem['x'] = x_view.view(dtype=np.int8).reshape(defs['X_BYTES'])
+        self.physical_addresses['x'] = self.mem_base.physical_address + offset
+        offset += defs['X_BYTES']
+        
+        # Output [O_WORDS] - O_TYPE
+        y_view = self.mem_base[offset:offset + defs['O_WORDS'] * np.dtype(o_type).itemsize]
+        self.mem['y'] = y_view.view(dtype=o_type).reshape(defs['O_WORDS'])
+        self.physical_addresses['y'] = self.mem_base.physical_address + offset
+        offset += defs['O_WORDS'] * np.dtype(o_type).itemsize
+        
+        # Add buffers (if any)
         if defs['N_ADD_BUF'] > 0:
-            self.mem['add_buffers'] = pynq.allocate(shape=(defs['N_ADD_BUF'], defs['NHWC_WORDS']), dtype=np.int8)
+            add_buffers_view = self.mem_base[offset:offset + defs['N_ADD_BUF'] * defs['NHWC_WORDS']]
+            self.mem['add_buffers'] = add_buffers_view.view(dtype=np.int8).reshape(defs['N_ADD_BUF'], defs['NHWC_WORDS'])
+            self.physical_addresses['add_buffers'] = self.mem_base.physical_address + offset
+            offset += defs['N_ADD_BUF'] * defs['NHWC_WORDS']
         
-        # Per C-runtime, parameters are written to accelerator BRAM, but we still
-        # allocate a buffer here for the notebook's verification steps.
+        # Allocate parameters buffer separately (this goes to BRAM, not main memory)
         self.mem['params'] = pynq.allocate(shape=(defs['N_BUNDLES'], 8), dtype=np.uint32)
-
+        
         print("Memory allocation complete.")
 
     def model_setup(self, wbx_path: str):
@@ -158,9 +228,7 @@ class DeepSoCFlowPYNQ:
         np.copyto(self.mem['b'], np.frombuffer(wbx_data[w_bytes : w_bytes + b_bytes], dtype=self.mem['b'].dtype))
         np.copyto(self.mem['x'], np.frombuffer(wbx_data[w_bytes + b_bytes:], dtype=self.mem['x'].dtype))
         
-        self.mem['w'].flush()
-        self.mem['b'].flush()
-        self.mem['x'].flush()
+        self.mem_base.flush()  # Flush the entire contiguous buffer
         print("\nData copy complete.")
 
         print("Pre-loading all bundle parameters into accelerator BRAM...")
@@ -169,10 +237,14 @@ class DeepSoCFlowPYNQ:
         params_buf = self.mem['params']
 
         for ib, b in enumerate(self.bundles):
-            x_buf = self.mem['x'] if b['in_buffer_idx'] == -1 else self.mem['out_buffers'][b['in_buffer_idx']]
+            # Use stored physical addresses instead of trying to access .physical_address on views
+            if b['in_buffer_idx'] == -1:
+                x_addr = self.physical_addresses['x']
+            else:
+                x_addr = self.physical_addresses['out_buffers'] + b['in_buffer_idx'] * self.defines['O_BYTES_MAX']
             
             # This parameter structure mimics the C-runtime
-            params_buf[ib][0] = x_buf.physical_address
+            params_buf[ib][0] = x_addr
             params_buf[ib][1] = b['x_bpt_p0']
             params_buf[ib][2] = b['x_bpt']
             params_buf[ib][3] = b['w_bpt_p0']
@@ -190,76 +262,58 @@ class DeepSoCFlowPYNQ:
 
         print("Parameter loading complete.")
 
-        print("--- DEBUG: Writing to HW Registers (C-Runtime Style) ---")
+        # Use stored physical addresses for hardware registers
         self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + 0) * 4, 1)
         self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + 1) * 4, 1)
         self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + 0) * 4, 0)
         self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + 1) * 4, 0)
-        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 0) * 4, self.mem['ocm'][0].physical_address)
-        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 1) * 4, self.mem['ocm'][1].physical_address)
-        self.mmio.write(self.REG_OFFSETS['A_WEIGHTS_BASE'] * 4, self.mem['w'].physical_address)
+        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 0) * 4, self.physical_addresses['ocm_0'])
+        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 1) * 4, self.physical_addresses['ocm_1'])
+        self.mmio.write(self.REG_OFFSETS['A_WEIGHTS_BASE'] * 4, self.physical_addresses['w'])
         self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
         self.mmio.write(self.REG_OFFSETS['A_N_BUNDLES_1'] * 4, self.defines['N_BUNDLES'])
-        # Initialize the status registers that were missing (critical!)
         self.mmio.write(self.REG_OFFSETS['A_W_DONE'] * 4, 0)
         self.mmio.write(self.REG_OFFSETS['A_X_DONE'] * 4, 0)
         self.mmio.write(self.REG_OFFSETS['A_O_DONE'] * 4, 0)
+        
         print("Register configuration complete.")
+        print(f"OCM Bank 0 address: 0x{self.physical_addresses['ocm_0']:08x}")
+        print(f"OCM Bank 1 address: 0x{self.physical_addresses['ocm_1']:08x}")
+        print(f"Weights address: 0x{self.physical_addresses['w']:08x}") 
         print("Model setup finished.")
 
 
-    def model_run(self, input_data=None, debug=False):
+    def model_run(self):
         """
         Executes the model inference on the accelerator, mimicking the C-runtime.
         """
-        # --- Fix for non-determinism: Force a complete HW re-initialization ---
-        print("  > Forcing clean state: Zeroing SW buffers and re-initializing all HW registers...")
-        # 1. Zero-out all intermediate/output software buffers
-        self.mem['nhwc'].fill(0)
-        self.mem['out_buffers'].fill(0)
-        self.mem['y'].fill(0)
-        if 'add_buffers' in self.mem:
-            self.mem['add_buffers'].fill(0)
-        
-        # 2. Force a full re-initialization of all hardware control registers
-        self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
-        self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + 0) * 4, 1)
-        self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + 1) * 4, 1)
-        self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + 0) * 4, 0)
-        self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + 1) * 4, 0)
-        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 0) * 4, self.mem['ocm'][0].physical_address)
-        self.mmio.write((self.REG_OFFSETS['A_OCM_BASE'] + 1) * 4, self.mem['ocm'][1].physical_address)
-        self.mmio.write(self.REG_OFFSETS['A_WEIGHTS_BASE'] * 4, self.mem['w'].physical_address)
-        self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
-        self.mmio.write(self.REG_OFFSETS['A_N_BUNDLES_1'] * 4, self.defines['N_BUNDLES'])
-        self.mmio.write(self.REG_OFFSETS['A_W_DONE'] * 4, 0)
-        self.mmio.write(self.REG_OFFSETS['A_X_DONE'] * 4, 0)
-        self.mmio.write(self.REG_OFFSETS['A_O_DONE'] * 4, 0)
-        # --------------------------------------------------------------------------
 
-        # --- Fix for timing/race condition: Add a small delay for HW state to settle ---
-        time.sleep(0.001)  # 1 millisecond delay
-        # ------------------------------------------------------------------------------
+        # --- DEBUG: Print buffer contents before starting ---
+        print("\n--- Verifying buffer contents at start of model_run ---")
+        try:
+            # 1. Verify 'w' (weights)
+            w_bits = 1 << self.defines['W_BITS_L2']
+            w_unpacked = unpack_bytes_into_words(self.mem['w'].tobytes(), w_bits)
+            print("First 16 values in 'w' buffer:", w_unpacked[:16])
+            
+            # 2. Verify 'b' (biases)
+            print("First 16 values in 'b' buffer:", self.mem['b'][:16])
 
-        if input_data is not None:
-            # This assumes the input buffer is self.mem['x'] for the first layer
-            np.copyto(self.mem['x'], input_data.flatten())
-            self.mem['x'].flush()
+            # 3. Verify 'x' (input)
+            x_bits = 1 << self.defines['X_BITS_L2']
+            x_unpacked = unpack_bytes_into_words(self.mem['x'].tobytes(), x_bits)
+            print("First 16 values in 'x' buffer:", x_unpacked[:16])
+        except Exception as e:
+            print(f"!!! Error printing debug buffer contents: {e}")
+        print("-------------------------------------------------------")
+
 
         print("\n--- Starting Model Inference ---")
         start_time = time.time()
 
-        # Start the accelerator with a pulse (1 -> 0)
+        # Start the accelerator by holding A_START high for the duration of the run
         self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 1)
-        self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
-
-        # The one-time status check is no longer needed
-        # time.sleep(0.1) 
-        # w_done = self.mmio.read(self.REG_OFFSETS['A_W_DONE'] * 4)
-        # x_done = self.mmio.read(self.REG_OFFSETS['A_X_DONE'] * 4)
-        # o_done = self.mmio.read(self.REG_OFFSETS['A_O_DONE'] * 4)
-        # print(f"  > HW Status after start: W_DONE={w_done}, X_DONE={x_done}, O_DONE={o_done}")
 
         ocm_bank = 1  # Will be flipped to 0 at the start of the first loop
 
@@ -283,18 +337,24 @@ class DeepSoCFlowPYNQ:
                                 ocm_bank = 1 - ocm_bank
                                 w_last = b['kw'] // 2 + 1 if iw_kw2 == b['w_kw2'] - 1 else 1
 
+                                # Calculate o_bpt like C runtime (for understanding data size)
+                                o_bpt = self.defines['PE_ROWS'] * b['coe'] * w_last * 4  # sizeof(int32) = 4
+
                                 # --- Wait for Accelerator ---
                                 while not self.mmio.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4):
-                                    time.sleep(0.00001) # Small sleep to avoid busy-waiting too aggressively
-                                
+                                    pass # Busy-wait like the C-runtime
+                                self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
+                                # However, we can use o_bpt to understand how many valid elements we have
+                                time.sleep(0.001) 
+                                valid_elements = o_bpt // 4  # Convert bytes to int32 elements
+                                # Invalidate the entire base buffer to ensure cache coherency
                                 self.mem['ocm'][ocm_bank].invalidate()
                                 
                                 if iw_kw2 == 0 and it == 0:
                                     print(f"\n--- Reading OCM Bank {ocm_bank} for Bundle {ib} (ip={ip}, it={it}, iw_kw2={iw_kw2}) ---")
-                                    # Print first 32 values to verify fix, without cluttering output
-                                    print(np.int16(self.mem['ocm'][ocm_bank][:32]))
-                                
-                                self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
+                                    print(f"o_bpt: {o_bpt} bytes, valid_elements: {valid_elements}")
+                                    print(f"OCM Bank {ocm_bank}: ", np.int32(self.mem['ocm'][ocm_bank][:min(32, valid_elements)]))
+
                                 
                                 # --- Process OCM Data (Python side) ---
                                 sram_addr = 0
@@ -314,8 +374,15 @@ class DeepSoCFlowPYNQ:
                                                 continue
                                             
                                             # Fix: Read the 32-bit word, then cast to 16-bit to get the correct value
-                                            raw_val = self.mem['ocm'][ocm_bank][sram_addr]
+                                            # Read from the correct OCM bank using physical address offset
+                                            ocm_physical_offset = self.physical_addresses[f'ocm_{ocm_bank}'] - self.mem_base.physical_address
+                                            ocm_byte_offset = ocm_physical_offset + (sram_addr * np.dtype(self._str_to_dtype[self.defines['Y_TYPE_str']]).itemsize)
+
+                                            # Create a view at the exact physical location
+                                            ocm_view = self.mem_base[ocm_byte_offset:ocm_byte_offset + np.dtype(self._str_to_dtype[self.defines['Y_TYPE_str']]).itemsize]
+                                            raw_val = ocm_view.view(dtype=self._str_to_dtype[self.defines['Y_TYPE_str']])[0]
                                             out_val = int(np.int16(raw_val))
+
                                             sram_addr += 1
 
                                             iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
@@ -372,14 +439,14 @@ class DeepSoCFlowPYNQ:
             # --- Signal Bundle Done ---
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
 
-            if ib == 0:
-                print("\nDEBUG: Stopping after bundle 0 for inspection.")
-                break
+            # if ib == 0:
+            #     print("\nDEBUG: Stopping after bundle 0 for inspection.")
+            #     break
 
         end_time = time.time()
         print(f"--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
         
-        # Reset accelerator start signal - NO LONGER NEEDED as it's now a pulse at the beginning.
+        # Reset accelerator start signal now that inference is complete
         # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         
         return self._get_final_output()
