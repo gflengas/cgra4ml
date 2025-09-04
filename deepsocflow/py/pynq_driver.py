@@ -343,13 +343,13 @@ class DeepSoCFlowPYNQ:
                                 # --- Wait for Accelerator ---
                                 while not self.mmio.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4):
                                     pass # Busy-wait like the C-runtime
-                                self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
+                               
                                 # However, we can use o_bpt to understand how many valid elements we have
                                 time.sleep(0.001) 
                                 valid_elements = o_bpt // 4  # Convert bytes to int32 elements
                                 # Invalidate the entire base buffer to ensure cache coherency
-                                self.mem['ocm'][ocm_bank].invalidate()
-                                
+                                self.mem['ocm'][ocm_bank].sync_from_device()
+                                self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
                                 if iw_kw2 == 0 and it == 0:
                                     print(f"\n--- Reading OCM Bank {ocm_bank} for Bundle {ib} (ip={ip}, it={it}, iw_kw2={iw_kw2}) ---")
                                     print(f"o_bpt: {o_bpt} bytes, valid_elements: {valid_elements}")
@@ -381,7 +381,7 @@ class DeepSoCFlowPYNQ:
                                             # Create a view at the exact physical location
                                             ocm_view = self.mem_base[ocm_byte_offset:ocm_byte_offset + np.dtype(self._str_to_dtype[self.defines['Y_TYPE_str']]).itemsize]
                                             raw_val = ocm_view.view(dtype=self._str_to_dtype[self.defines['Y_TYPE_str']])[0]
-                                            out_val = int(np.int16(raw_val))
+                                            out_val = int(raw_val)
 
                                             sram_addr += 1
 
