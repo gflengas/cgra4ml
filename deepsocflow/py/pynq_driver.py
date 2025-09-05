@@ -316,9 +316,24 @@ class DeepSoCFlowPYNQ:
         self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 1)
 
         ocm_bank = 1  # Will be flipped to 0 at the start of the first loop
+        first_pixel_printed = False # Add a flag to print only once per run
 
         for ib, b in enumerate(self.bundles):
             print(f"Executing Bundle {ib}/{len(self.bundles)-1}...")
+            
+            # --- DEBUG: Print the input buffer for this bundle ---
+            in_buffer_idx = b.get('in_buffer_idx', -1)
+            if in_buffer_idx == -1:
+                input_buf = self.mem['x']
+                print("  > Using initial model input ('x' buffer).")
+            else:
+                input_buf = self.mem['out_buffers'][in_buffer_idx]
+                print(f"  > Using output buffer {in_buffer_idx} from a previous bundle as input.")
+            
+            x_bits = 1 << self.defines['X_BITS_L2']
+            unpacked_input = unpack_bytes_into_words(input_buf.tobytes(), x_bits)
+            print(f"  > Input data (first 16 values): {unpacked_input[:16]}")
+            # --- End DEBUG Print ---
             
             # This buffer will hold the fully assembled NHWC output for this layer
             nhwc_buf_shape = (b['n'], b['ch'], b['cw'], b['co'])
@@ -373,19 +388,19 @@ class DeepSoCFlowPYNQ:
                                                 sram_addr += 1
                                                 continue
                                             
-                                            # Fix: Read the 32-bit word, then cast to 16-bit to get the correct value
-                                            # Read from the correct OCM bank using physical address offset
-                                            ocm_physical_offset = self.physical_addresses[f'ocm_{ocm_bank}'] - self.mem_base.physical_address
-                                            ocm_byte_offset = ocm_physical_offset + (sram_addr * np.dtype(self._str_to_dtype[self.defines['Y_TYPE_str']]).itemsize)
-
-                                            # Create a view at the exact physical location
-                                            ocm_view = self.mem_base[ocm_byte_offset:ocm_byte_offset + np.dtype(self._str_to_dtype[self.defines['Y_TYPE_str']]).itemsize]
-                                            raw_val = ocm_view.view(dtype=self._str_to_dtype[self.defines['Y_TYPE_str']])[0]
-                                            out_val = int(raw_val)
+                                            raw_val = self.mem['ocm'][ocm_bank][sram_addr]
+                                            out_val = np.int32(raw_val)
 
                                             sram_addr += 1
 
                                             iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+                                            print(f"  > iy_nhwc: {iy_nhwc}")
+                                            if not first_pixel_printed and ib == 0:
+                                                print(f"\n--- Tracing first raw pixel for Bundle {ib} ---")
+                                                print(f"  > Raw val from OCM: {raw_val} at coords (iyh={i_yh}, iyw={i_yw}, iyc={i_yc})")
+                                                print(f"  > Stride check: (i_yh - {b['csh_shift']}) % {b['csh']} = {(i_yh - b['csh_shift']) % b['csh']}")
+                                                print(f"  > Stride check: (i_yw - {b['csw_shift']}) % {b['csw']} = {(i_yw - b['csw_shift']) % b['csw']}")
+
 
                                             # --- ADD P PASSES ---
                                             if b['p'] > 1:
@@ -402,7 +417,10 @@ class DeepSoCFlowPYNQ:
                                             if (i_yh - b['csh_shift']) % b['csh'] != 0 or \
                                                (i_yw - b['csw_shift']) % b['csw'] != 0:
                                                 continue
-                                            
+
+                                            if not first_pixel_printed and ib == 0:
+                                                print(f"  > Passed striding check.")
+
                                             i_yh = (i_yh - b['csh_shift']) // b['csh']
                                             i_yw = (i_yw - b['csw_shift']) // b['csw']
                                             
@@ -410,9 +428,15 @@ class DeepSoCFlowPYNQ:
                                             if b.get('is_bias', False):
                                                 bias = int(self.mem['b'][i_bias])
                                                 out_val = (out_val << b['b_val_shift']) + (bias << b['b_bias_shift'])
+                                                if not first_pixel_printed and ib == 0:
+                                                    print(f"  > After bias add: {out_val}")
                                                 
                                             # --- CORE ACT ---
                                             out_val = self._quant_lrelu(out_val, b['ca_nzero'], b['ca_shift'], b['ca_pl_scale'])
+
+                                            if not first_pixel_printed and ib == 0:
+                                                print(f"  > After quant_lrelu (final value for nhwc_buf): {out_val}")
+                                                first_pixel_printed = True
 
                                             # --- RESIDUAL ADD ---
                                             if b.get('add_in_buffer_idx', -1) != -1:
@@ -434,6 +458,11 @@ class DeepSoCFlowPYNQ:
 
             # --- Post-Bundle Processing (Pooling, Packing) ---
             print(f"  > Post-processing bundle {ib}...")
+            
+            # --- DEBUG: Print the calculated NHWC buffer before pooling/packing ---
+            print(f"  > Calculated NHWC buffer (first 16 values): {nhwc_buf[:16]}")
+            # --- End DEBUG Print ---
+
             self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
             
             # --- Signal Bundle Done ---
@@ -528,15 +557,16 @@ class DeepSoCFlowPYNQ:
 
     def shift_round(self, n, s):
         """
-        Implements the exact C runtime shift_round behavior:
-        shift_round(n, s) = (((n) + ((s)>0 ? (1<<((s)-1)) - (~((n)>>(s))&1) : 0)) >> s)
+        Implements the exact C runtime shift_round behavior using numpy,
+        which correctly handles rounding half to the nearest even number.
+        shift_round(n, s) === np.around(n / 2**s)
         """
         if s <= 0:
-            return n >> s if s < 0 else n
+            return np.int32(n >> s if s < 0 else n)
         
-        # Calculate the rounding adjustment
-        round_adjust = (1 << (s - 1)) - (~((n >> s) & 1) & 1)
-        return (n + round_adjust) >> s
+        # Using np.around correctly mimics the C macro's tie-breaking behavior
+        # and the developer's own comment in runtime.h
+        return np.int32(np.around(n / (2**s)))
 
     def div_round(self, a, b):
         """
@@ -593,8 +623,17 @@ class DeepSoCFlowPYNQ:
             else:
                 processed_data = img
 
+            # --- DEBUG: Print the data after pooling is complete ---
+            print(f"    > Post-pooling data shape: {processed_data.shape}")
+            print(f"    > Post-pooling data (first 16 flat values): {processed_data.flatten()[:16]}")
+            # --- End DEBUG Print ---
+
         # --- Flatten and Pack ---
         output_words = processed_data.flatten()
+        
+        # --- DEBUG: Print the final flattened words before packing ---
+        print(f"    > Pre-packing data (first 16 values): {output_words[:16]}")
+        # --- End DEBUG Print ---
         
         is_last_bundle = (b['ib'] == len(self.bundles) - 1)
 
