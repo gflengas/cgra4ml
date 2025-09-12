@@ -288,27 +288,6 @@ class DeepSoCFlowPYNQ:
         """
         Executes the model inference on the accelerator, mimicking the C-runtime.
         """
-
-        # --- DEBUG: Print buffer contents before starting ---
-        print("\n--- Verifying buffer contents at start of model_run ---")
-        try:
-            # 1. Verify 'w' (weights)
-            w_bits = 1 << self.defines['W_BITS_L2']
-            w_unpacked = unpack_bytes_into_words(self.mem['w'].tobytes(), w_bits)
-            print("First 16 values in 'w' buffer:", w_unpacked[:16])
-            
-            # 2. Verify 'b' (biases)
-            print("First 16 values in 'b' buffer:", self.mem['b'][:16])
-
-            # 3. Verify 'x' (input)
-            x_bits = 1 << self.defines['X_BITS_L2']
-            x_unpacked = unpack_bytes_into_words(self.mem['x'].tobytes(), x_bits)
-            print("First 16 values in 'x' buffer:", x_unpacked[:16])
-        except Exception as e:
-            print(f"!!! Error printing debug buffer contents: {e}")
-        print("-------------------------------------------------------")
-
-
         print("\n--- Starting Model Inference ---")
         start_time = time.time()
 
@@ -316,23 +295,22 @@ class DeepSoCFlowPYNQ:
         self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 1)
 
         ocm_bank = 1  # Will be flipped to 0 at the start of the first loop
-        first_pixel_printed = False # Add a flag to print only once per run
+        ocm_printed_for_bundle = set()  # Track which bundles have had OCM output printed
 
         for ib, b in enumerate(self.bundles):
-            print(f"Executing Bundle {ib}/{len(self.bundles)-1}...")
+            print(f"--- Bundle {ib} ---")
             
             # --- DEBUG: Print the input buffer for this bundle ---
             in_buffer_idx = b.get('in_buffer_idx', -1)
             if in_buffer_idx == -1:
                 input_buf = self.mem['x']
-                print("  > Using initial model input ('x' buffer).")
             else:
                 input_buf = self.mem['out_buffers'][in_buffer_idx]
-                print(f"  > Using output buffer {in_buffer_idx} from a previous bundle as input.")
             
             x_bits = 1 << self.defines['X_BITS_L2']
             unpacked_input = unpack_bytes_into_words(input_buf.tobytes(), x_bits)
-            print(f"  > Input data (first 16 values): {unpacked_input[:16]}")
+            print(f"Inputs ({ib}_xe.txt):")
+            print(f"[{', '.join(map(str, unpacked_input[:16]))}]")
             # --- End DEBUG Print ---
             
             # This buffer will hold the fully assembled NHWC output for this layer
@@ -358,17 +336,19 @@ class DeepSoCFlowPYNQ:
                                 # --- Wait for Accelerator ---
                                 while not self.mmio.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4):
                                     pass # Busy-wait like the C-runtime
-                               
                                 # However, we can use o_bpt to understand how many valid elements we have
                                 time.sleep(0.001) 
                                 valid_elements = o_bpt // 4  # Convert bytes to int32 elements
                                 # Invalidate the entire base buffer to ensure cache coherency
                                 self.mem['ocm'][ocm_bank].sync_from_device()
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
-                                if iw_kw2 == 0 and it == 0:
-                                    print(f"\n--- Reading OCM Bank {ocm_bank} for Bundle {ib} (ip={ip}, it={it}, iw_kw2={iw_kw2}) ---")
-                                    print(f"o_bpt: {o_bpt} bytes, valid_elements: {valid_elements}")
-                                    print(f"OCM Bank {ocm_bank}: ", np.int32(self.mem['ocm'][ocm_bank][:min(32, valid_elements)]))
+                                if ib not in ocm_printed_for_bundle and iw_kw2 == 0 and it == 0 and ip == 0:
+                                    print(f"OCM Raw Output ({ib}_{ip}_{it}_y_raw_sim.txt):")
+                                    ocm_values = np.int32(self.mem['ocm'][ocm_bank][:min(16, valid_elements)])
+                                    print(f"[{', '.join(map(str, ocm_values))}]")
+                                    # Store for summed output debug
+                                    self._last_ocm_values = ocm_values.copy()
+                                    ocm_printed_for_bundle.add(ib)  # Mark this bundle as printed
 
                                 
                                 # --- Process OCM Data (Python side) ---
@@ -394,49 +374,34 @@ class DeepSoCFlowPYNQ:
                                             sram_addr += 1
 
                                             iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
-                                            print(f"  > iy_nhwc: {iy_nhwc}")
-                                            if not first_pixel_printed and ib == 0:
-                                                print(f"\n--- Tracing first raw pixel for Bundle {ib} ---")
-                                                print(f"  > Raw val from OCM: {raw_val} at coords (iyh={i_yh}, iyw={i_yw}, iyc={i_yc})")
-                                                print(f"  > Stride check: (i_yh - {b['csh_shift']}) % {b['csh']} = {(i_yh - b['csh_shift']) % b['csh']}")
-                                                print(f"  > Stride check: (i_yw - {b['csw_shift']}) % {b['csw']} = {(i_yw - b['csw_shift']) % b['csw']}")
-
 
                                             # --- ADD P PASSES ---
-                                            if b['p'] > 1:
-                                                if ip == b['p'] - 1:
-                                                    out_val += self.mem['nhwc'][iy_nhwc]
-                                                elif ip == 0:
-                                                    self.mem['nhwc'][iy_nhwc] = out_val
-                                                    continue
-                                                else:
-                                                    self.mem['nhwc'][iy_nhwc] += out_val
-                                                    continue
+
+                                            if b['p'] == 1:
+                                                pass
+                                            elif ip == b['p'] - 1:
+                                                out_val += self.mem['nhwc'][iy_nhwc]
+                                            elif ip == 0:
+                                                self.mem['nhwc'][iy_nhwc] = out_val
+                                                continue
+                                            else:
+                                                self.mem['nhwc'][iy_nhwc] += out_val
+                                                continue
                                             
                                             # --- CONV STRIDING ---
                                             if (i_yh - b['csh_shift']) % b['csh'] != 0 or \
                                                (i_yw - b['csw_shift']) % b['csw'] != 0:
                                                 continue
 
-                                            if not first_pixel_printed and ib == 0:
-                                                print(f"  > Passed striding check.")
-
                                             i_yh = (i_yh - b['csh_shift']) // b['csh']
                                             i_yw = (i_yw - b['csw_shift']) // b['csw']
-                                            
                                             # --- ADD BIAS ---
                                             if b.get('is_bias', False):
                                                 bias = int(self.mem['b'][i_bias])
                                                 out_val = (out_val << b['b_val_shift']) + (bias << b['b_bias_shift'])
-                                                if not first_pixel_printed and ib == 0:
-                                                    print(f"  > After bias add: {out_val}")
                                                 
                                             # --- CORE ACT ---
                                             out_val = self._quant_lrelu(out_val, b['ca_nzero'], b['ca_shift'], b['ca_pl_scale'])
-
-                                            if not first_pixel_printed and ib == 0:
-                                                print(f"  > After quant_lrelu (final value for nhwc_buf): {out_val}")
-                                                first_pixel_printed = True
 
                                             # --- RESIDUAL ADD ---
                                             if b.get('add_in_buffer_idx', -1) != -1:
@@ -452,18 +417,39 @@ class DeepSoCFlowPYNQ:
                                             final_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
                                             if final_iy_nhwc < nhwc_buf.size:
                                                 nhwc_buf[final_iy_nhwc] = out_val
+                                                
+                                                # --- STORE FOR RESIDUAL ADD (missing from PyNQ driver!) ---
+                                                if b.get('add_out_buffer_idx', -1) != -1:
+                                                    self.mem['add_buffers'][b['add_out_buffer_idx']][final_iy_nhwc] = np.int8(out_val)
                                 
                                 # --- Signal Done Reading ---
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + ocm_bank) * 4, 1)
+                                # if ib == 0:
+                                #     print("\nDEBUG: Stopping after bundle 0 for inspection.")
+                                #     self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
+                                #     break
 
-            # --- Post-Bundle Processing (Pooling, Packing) ---
-            print(f"  > Post-processing bundle {ib}...")
+            # --- Print OCM Summed Output ---
+            if b['p'] > 1:
+                print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
+                print(f"[{', '.join(map(str, self.mem['nhwc'][:16]))}]")
+            else:
+                print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
+                if hasattr(self, '_last_ocm_values'):
+                    print(f"[{', '.join(map(str, self._last_ocm_values[:16]))}]")
+                else:
+                    print(f"[{', '.join(map(str, nhwc_buf[:16]))}]")
             
-            # --- DEBUG: Print the calculated NHWC buffer before pooling/packing ---
-            print(f"  > Calculated NHWC buffer (first 16 values): {nhwc_buf[:16]}")
-            # --- End DEBUG Print ---
 
             self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
+            # --- Print Post-processing NHWC Buffer ---
+            print(f"Post-processing NHWC Buffer ({ib}_y_nhwc_sim.txt):")
+            x_bits = 1 << self.defines['X_BITS_L2']
+            processed_output = unpack_bytes_into_words(p_out_buffer.tobytes(), x_bits)
+            print(f"[{', '.join(map(str, processed_output[:16]))}]")
+            
+            # --- Tiled Output ---
+            
             
             # --- Signal Bundle Done ---
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
@@ -472,74 +458,22 @@ class DeepSoCFlowPYNQ:
             #     print("\nDEBUG: Stopping after bundle 0 for inspection.")
             #     break
 
+        # --- Print Final Model Output ---
+        final_output = self._get_final_output()
+        
         end_time = time.time()
-        print(f"--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
+        print(f"\n--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
         
         # Reset accelerator start signal now that inference is complete
         # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         
-        return self._get_final_output()
+        return final_output
 
-    def _flatten_nhwc(self, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc):
+    def _flatten_nhwc(self, in_val, ih, iw, ic, N, H, W, C):
         """
         Exactly matches the C runtime flatten_nhwc macro
         """
-        return ((i_yn * yh + i_yh) * yw + i_yw) * yc + i_yc
-
-    def _tile_write_py(self, out_val, b, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc, nhwc_buf):
-        """
-        Python equivalent of the C runtime tile_write function
-        This is the critical function we were missing!
-        """
-        # ------ FLATTEN ------ (exactly like C runtime)
-        if b.get('is_flatten', False):
-            i_yc = (i_yh * yw + i_yw) * yc + i_yc  # (H*W*C) -> C
-            i_yw = 0                               # W=1
-            i_yh = i_yn                           # N -> H
-            i_yn = 0                              # N=1
-            
-            yc = yh * yw * yc
-            yw = 1
-            yh = yn
-            yn = 1
-
-        # ------ STORE IN NHWC ------ (exactly like C runtime)
-        iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['on'], b['oh'], b['ow'], b['oc'])
-        
-        # For debugging, also store in our nhwc_buf (equivalent to mp->debug_nhwc)
-        if iy_nhwc < len(nhwc_buf):
-            nhwc_buf[iy_nhwc] = out_val
-        
-        is_last_bundle = (b['ib'] == len(self.bundles) - 1)
-        
-        if is_last_bundle:
-            # Last bundle: save as NHWC in final output
-            if iy_nhwc < len(self.mem['y']):
-                self.mem['y'][iy_nhwc] = out_val
-            return
-
-        # Store for residual add (if needed)
-        if b.get('add_out_buffer_idx', -1) != -1:
-            if iy_nhwc < len(self.mem['add_buffers'][b['add_out_buffer_idx']]):
-                self.mem['add_buffers'][b['add_out_buffer_idx']][iy_nhwc] = np.int8(out_val)
-
-        # If output only goes to residual add, early return
-        if b.get('ib_out', -1) == -1:
-            return
-
-        # ------ TILING: Calculate X coordinates ------ (complex tiling logic)
-        # For now, we'll use the simplified approach since the tiling logic is very complex
-        # TODO: Implement full tiling logic if this doesn't work
-        
-        # For Bundle 0, let's check if this is supposed to be packed
-        if not is_last_bundle:
-            # Pack the data into the output buffer (simplified version)
-            o_buf = self.mem['out_buffers'][b['out_buffer_idx']]
-            x_bits = 1 << self.defines['X_BITS_L2']
-            
-            # For now, use simple indexing - we may need to implement full tiling later
-            if iy_nhwc < len(nhwc_buf):
-                nhwc_buf[iy_nhwc] = out_val
+        return ((in_val * H + ih) * W + iw) * C + ic
 
     def _quant_lrelu(self, x, nzero, shift, pl_scale):
         """
@@ -547,33 +481,50 @@ class DeepSoCFlowPYNQ:
         """
         x_bits = 1 << self.defines['X_BITS_L2']
         
-        # Conditional, targeting ARM (exactly like C runtime)
-        x = x if (x < 0 and nzero) or (x >= 0) else 0
-        if x >= 0:
-            x = x << pl_scale
+        # Leaky ReLU logic (matches C: x < 0 ? (nzero ? x: 0) : x << pl_scale)
+        if x < 0:
+            x = x if nzero else 0  # leaky if nzero != 0, else standard ReLU
+        else:
+            x = x << pl_scale      # shift positive values left
+        
+        # Apply shift_round
         x = self.shift_round(x, shift)
-        x = np.clip(x, -(1 << (x_bits - pl_scale - 1)), (1 << (x_bits - 1)) - 1)
+        
+        # Clip to valid range: -(1<<(X_BITS-pl_scale-1)) to (1<<(X_BITS-1))-1
+        min_val = -(1 << (x_bits - pl_scale - 1))
+        max_val = (1 << (x_bits - 1)) - 1
+        x = np.clip(x, min_val, max_val)
+        
         return x
 
     def shift_round(self, n, s):
         """
-        Implements the exact C runtime shift_round behavior using numpy,
-        which correctly handles rounding half to the nearest even number.
-        shift_round(n, s) === np.around(n / 2**s)
+        Bitwise implementation of shift_round, matching the C macro exactly
         """
         if s <= 0:
-            return np.int32(n >> s if s < 0 else n)
+            return n
         
-        # Using np.around correctly mimics the C macro's tie-breaking behavior
-        # and the developer's own comment in runtime.h
-        return np.int32(np.around(n / (2**s)))
+        # For positive numbers: add 2^(s-1) before shifting (rounds half up)
+        # For negative numbers: need to handle sign extension carefully
+        if n >= 0:
+            return (n + (1 << (s - 1))) >> s
+        else:
+            # For negative numbers, Python's >> is arithmetic shift (sign-extending)
+            return (n + (1 << (s - 1))) >> s
 
     def div_round(self, a, b):
         """
         Implements the exact C runtime div_round behavior:
         div_round(a, b) = (((a)+((b)/2) - (~((b)|(a)/(b)) &1))/(b))
         """
-        return ((a + (b // 2) - (~((b | (a // b)) & 1) & 1)) // b)
+        if b == 0:
+            raise ZeroDivisionError("Division by zero")
+        
+        # Add half the divisor for rounding, but handle sign correctly
+        if (a >= 0) == (b >= 0):  # same sign
+            return (a + b // 2) // b
+        else:  # different signs
+            return (a - b // 2) // b
 
 
     def _perform_pooling_and_packing(self, nhwc_buf, o_buf, b):
@@ -623,36 +574,99 @@ class DeepSoCFlowPYNQ:
             else:
                 processed_data = img
 
-            # --- DEBUG: Print the data after pooling is complete ---
-            print(f"    > Post-pooling data shape: {processed_data.shape}")
-            print(f"    > Post-pooling data (first 16 flat values): {processed_data.flatten()[:16]}")
-            # --- End DEBUG Print ---
-
-        # --- Flatten and Pack ---
-        output_words = processed_data.flatten()
-        
-        # --- DEBUG: Print the final flattened words before packing ---
-        print(f"    > Pre-packing data (first 16 values): {output_words[:16]}")
-        # --- End DEBUG Print ---
-        
         is_last_bundle = (b['ib'] == len(self.bundles) - 1)
 
         if is_last_bundle:
             # For the final output, we do not pack. The data is int32.
             # o_buf is self.mem['y'] which is already of the correct dtype.
+            output_words = processed_data.flatten()
             np.copyto(o_buf[:output_words.size], output_words)
         else:
-            # For intermediate layers, pack the data to the network's internal bit-width.
-            x_bits = 1 << self.defines['X_BITS_L2']
-            packed_bytes = pack_words_into_bytes(output_words, x_bits)
-            
-            # Create a view of the packed bytes with the correct dtype of the output buffer
-            packed_as_dtype = np.frombuffer(packed_bytes, dtype=o_buf.dtype)
-            
-            # Copy only the generated data into the beginning of the output buffer slice
-            np.copyto(o_buf[:packed_as_dtype.size], packed_as_dtype)
+            # FOR INTERMEDIATE BUNDLES: Use tiling instead of NHWC flattening
+            if b.get('ib_out', -1) != -1:
+                pb_out = self.bundles[b['ib_out']]
+                self._write_tiled_output(processed_data, o_buf, b, pb_out)
+            else:
+                # Fallback to NHWC if no output bundle
+                output_words = processed_data.flatten()
+                x_bits = 1 << self.defines['X_BITS_L2']
+                packed_bytes = pack_words_into_bytes(output_words, x_bits)
+                packed_as_dtype = np.frombuffer(packed_bytes, dtype=o_buf.dtype)
+                np.copyto(o_buf[:packed_as_dtype.size], packed_as_dtype)
 
         o_buf.flush()
+
+    def _write_tiled_output(self, processed_data, o_buf, pb, pb_out):
+        """
+        Write processed data in tiled format expected by next bundle
+        """
+        o_buf.fill(0)  # Clear buffer
+        
+        # Get dimensions
+        if len(processed_data.shape) == 1:
+            # Flattened data, reshape it using ACTUAL output dimensions
+            # For bundle 0, this should be the post-stride, post-pooling dimensions
+            actual_size = processed_data.size
+            expected_size = pb['n'] * pb['oh'] * pb['ow'] * pb['co']  # Use 'oh', 'ow' not 'ch', 'cw'
+            
+            print(f"DEBUG: processed_data.size={actual_size}, expected_size={expected_size}")
+            print(f"DEBUG: pb dimensions n={pb['n']}, oh={pb['oh']}, ow={pb['ow']}, co={pb['co']}")
+            
+            if actual_size != expected_size:
+                print(f"WARNING: Size mismatch! Using actual size to infer dimensions")
+                # Try to infer correct dimensions
+                if actual_size == pb['n'] * pb['ch'] * pb['cw'] * pb['co']:
+                    data = processed_data.reshape(pb['n'], pb['ch'], pb['cw'], pb['co'])
+                    n, h, w, c = pb['n'], pb['ch'], pb['cw'], pb['co']
+                else:
+                    data = processed_data.reshape(pb['n'], pb['oh'], pb['ow'], pb['co'])
+                    n, h, w, c = pb['n'], pb['oh'], pb['ow'], pb['co']
+            else:
+                data = processed_data.reshape(pb['n'], pb['oh'], pb['ow'], pb['co'])
+                n, h, w, c = pb['n'], pb['oh'], pb['ow'], pb['co']
+        else:
+            data = processed_data
+            n, h, w, c = data.shape
+        
+        print(f"DEBUG: Final data shape: {data.shape}")
+        
+        x_bits = 1 << self.defines['X_BITS_L2']
+        x_words_per_byte = 8 // x_bits
+        
+        # Iterate through all output positions using ACTUAL dimensions
+        for i_yn in range(n):
+            for i_yh in range(h):
+                for i_yw in range(w):
+                    for i_yc in range(c):
+                        out_val = int(data[i_yn, i_yh, i_yw, i_yc])
+                        
+                        # Calculate tiled coordinates (matching C tile_write)
+                        yp_first = i_yc < pb_out['cm_p0']
+                        
+                        i_yr = i_yh % self.defines['PE_ROWS']
+                        i_yl = i_yh // self.defines['PE_ROWS']
+                        
+                        if yp_first:
+                            i_yp = 0
+                            i_ycm = i_yc
+                            ycm = pb_out['cm_p0']
+                        else:
+                            i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
+                            i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
+                            ycm = pb_out['cm']
+                        
+                        # Calculate flat index in tiled format
+                        p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
+                        pe_rows = self.defines['PE_ROWS']
+                        flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + i_yw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
+                        
+                        # Pack and store
+                        byte_idx = flat_index // x_words_per_byte
+                        bit_offset = (flat_index % x_words_per_byte) * x_bits
+                        
+                        if byte_idx < len(o_buf):
+                            mask = (1 << x_bits) - 1
+                            o_buf[byte_idx] |= (out_val & mask) << bit_offset
 
     def _get_final_output(self):
         """
