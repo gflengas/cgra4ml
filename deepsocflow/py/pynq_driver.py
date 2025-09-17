@@ -69,7 +69,7 @@ class DeepSoCFlowPYNQ:
     def __init__(self, overlay: pynq.Overlay, config_path: str, accelerator_ip_name: str):
         if accelerator_ip_name not in overlay.ip_dict:
             raise AttributeError(f"Could not find IP '{accelerator_ip_name}' in overlay.ip_dict. "
-                                 f"Available IPs are: {list(overlay.ip_dict.keys())}")
+                                f"Available IPs are: {list(overlay.ip_dict.keys())}")
         
         ip_description = overlay.ip_dict[accelerator_ip_name]
         self.accelerator = pynq.overlay.DefaultIP(description=ip_description)
@@ -295,7 +295,6 @@ class DeepSoCFlowPYNQ:
         self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 1)
 
         ocm_bank = 1  # Will be flipped to 0 at the start of the first loop
-        ocm_printed_for_bundle = set()  # Track which bundles have had OCM output printed
 
         for ib, b in enumerate(self.bundles):
             print(f"--- Bundle {ib} ---")
@@ -318,6 +317,10 @@ class DeepSoCFlowPYNQ:
             nhwc_buf_size = np.prod(nhwc_buf_shape)
             nhwc_buf = np.zeros(nhwc_buf_size, dtype=np.int32)
             
+            # A sequential log to store the output after p-pass summing, to exactly
+            # mimic the C-runtime's `y_sum_sim.txt` debug output.
+            y_sum_sim_log = []
+
             p_out_buffer = self.mem['y'] if ib == len(self.bundles) - 1 else self.mem['out_buffers'][b['out_buffer_idx']]
 
             for ip in range(b['p']):
@@ -342,13 +345,10 @@ class DeepSoCFlowPYNQ:
                                 # Invalidate the entire base buffer to ensure cache coherency
                                 self.mem['ocm'][ocm_bank].sync_from_device()
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
-                                if ib not in ocm_printed_for_bundle and iw_kw2 == 0 and it == 0 and ip == 0:
-                                    print(f"OCM Raw Output ({ib}_{ip}_{it}_y_raw_sim.txt):")
-                                    ocm_values = np.int32(self.mem['ocm'][ocm_bank][:min(16, valid_elements)])
-                                    print(f"[{', '.join(map(str, ocm_values))}]")
-                                    # Store for summed output debug
-                                    self._last_ocm_values = ocm_values.copy()
-                                    ocm_printed_for_bundle.add(ib)  # Mark this bundle as printed
+                                print(f"OCM Raw Output ({ib}_{ip}_{it}_y_raw_sim.txt):")
+                                # ocm_values = np.int32(self.mem['ocm'][ocm_bank])
+                                # print(f"[{', '.join(map(str, ocm_values))}]")
+                                print(np.int32(self.mem['ocm'][ocm_bank][:valid_elements]))
 
                                 
                                 # --- Process OCM Data (Python side) ---
@@ -365,12 +365,15 @@ class DeepSoCFlowPYNQ:
                                             yn, yh, yw, yc = b['n'], b['h'], b['w'], b['co']
 
                                             if i_yh >= yh or i_yc >= yc:
+                                                # C-runtime prints a 0 for out-of-bounds on the last pass.
+                                                # The original `b['p'] > 1` check was incorrect.
+                                                if ip == b['p'] - 1:
+                                                    y_sum_sim_log.append(0)
                                                 sram_addr += 1
                                                 continue
                                             
                                             raw_val = self.mem['ocm'][ocm_bank][sram_addr]
                                             out_val = np.int32(raw_val)
-
                                             sram_addr += 1
 
                                             iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
@@ -388,18 +391,23 @@ class DeepSoCFlowPYNQ:
                                                 self.mem['nhwc'][iy_nhwc] += out_val
                                                 continue
                                             
+                                            # Log the value after summing is complete to match C behavior
+                                            y_sum_sim_log.append(out_val)
+
                                             # --- CONV STRIDING ---
                                             if (i_yh - b['csh_shift']) % b['csh'] != 0 or \
-                                               (i_yw - b['csw_shift']) % b['csw'] != 0:
+                                            (i_yw - b['csw_shift']) % b['csw'] != 0:
                                                 continue
 
                                             i_yh = (i_yh - b['csh_shift']) // b['csh']
                                             i_yw = (i_yw - b['csw_shift']) // b['csw']
                                             # --- ADD BIAS ---
                                             if b.get('is_bias', False):
-                                                bias = int(self.mem['b'][i_bias])
-                                                out_val = (out_val << b['b_val_shift']) + (bias << b['b_bias_shift'])
-                                                
+                                                bias = np.int16(self.mem['b'][i_bias])
+                                                # Emulate C's 32-bit signed integer arithmetic to match hardware behavior
+                                                # Each term is cast to int32 *before* shifting and adding to mimic C's behavior
+                                                out_val = (np.int32(out_val) << b['b_val_shift']) + (np.int32(bias) << b['b_bias_shift'])
+                                            
                                             # --- CORE ACT ---
                                             out_val = self._quant_lrelu(out_val, b['ca_nzero'], b['ca_shift'], b['ca_pl_scale'])
 
@@ -408,7 +416,8 @@ class DeepSoCFlowPYNQ:
                                                 # Need to re-calculate iy_nhwc for the *post-stride* dimensions
                                                 add_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
                                                 add_val = int(self.mem['add_buffers'][b['add_in_buffer_idx']][add_iy_nhwc])
-                                                out_val += add_val
+                                                # Emulate C's 32-bit signed integer arithmetic
+                                                out_val = np.int32(out_val) + np.int32(add_val)
                                                 out_val = self._quant_lrelu(out_val, b['aa_nzero'], b['aa_shift'], b['aa_pl_scale'])
                                             
                                             # This is where the C code does tile_write, but that is complex.
@@ -424,39 +433,28 @@ class DeepSoCFlowPYNQ:
                                 
                                 # --- Signal Done Reading ---
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + ocm_bank) * 4, 1)
-                                # if ib == 0:
-                                #     print("\nDEBUG: Stopping after bundle 0 for inspection.")
-                                #     self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
-                                #     break
 
             # --- Print OCM Summed Output ---
-            if b['p'] > 1:
-                print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
-                print(f"[{', '.join(map(str, self.mem['nhwc'][:16]))}]")
-            else:
-                print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
-                if hasattr(self, '_last_ocm_values'):
-                    print(f"[{', '.join(map(str, self._last_ocm_values[:16]))}]")
-                else:
-                    print(f"[{', '.join(map(str, nhwc_buf[:16]))}]")
+            # This print statement now correctly shows the pre-processing summed output,
+            # matching the `y_sum_sim.txt` from the C simulation.
+            print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
+            print(f"[{', '.join(map(str, y_sum_sim_log))}]")
             
 
             self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
-            # --- Print Post-processing NHWC Buffer ---
-            print(f"Post-processing NHWC Buffer ({ib}_y_nhwc_sim.txt):")
+            # --- Print final output of the bundle ---
+            print(f"Final output of the bundle ({ib}_y_tiled_sim.txt):")
             x_bits = 1 << self.defines['X_BITS_L2']
-            processed_output = unpack_bytes_into_words(p_out_buffer.tobytes(), x_bits)
-            print(f"[{', '.join(map(str, processed_output[:16]))}]")
+            # Slice the buffer to the actual size to prevent reading stale data
+            valid_output_bytes = p_out_buffer[:b['o_bytes']]
+            processed_output = unpack_bytes_into_words(valid_output_bytes.tobytes(), x_bits)
+            print(f"[{', '.join(map(str, processed_output))}]")
             
             # --- Tiled Output ---
             
             
             # --- Signal Bundle Done ---
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
-
-            # if ib == 0:
-            #     print("\nDEBUG: Stopping after bundle 0 for inspection.")
-            #     break
 
         # --- Print Final Model Output ---
         final_output = self._get_final_output()
@@ -482,49 +480,52 @@ class DeepSoCFlowPYNQ:
         x_bits = 1 << self.defines['X_BITS_L2']
         
         # Leaky ReLU logic (matches C: x < 0 ? (nzero ? x: 0) : x << pl_scale)
+        original_x = x
+        leaky_x = 0
         if x < 0:
-            x = x if nzero else 0  # leaky if nzero != 0, else standard ReLU
+            leaky_x = x if nzero else 0  # leaky if nzero != 0, else standard ReLU
         else:
-            x = x << pl_scale      # shift positive values left
+            leaky_x = x << pl_scale      # shift positive values left
         
         # Apply shift_round
-        x = self.shift_round(x, shift)
+        shifted_x = self.shift_round(leaky_x, shift)
         
         # Clip to valid range: -(1<<(X_BITS-pl_scale-1)) to (1<<(X_BITS-1))-1
         min_val = -(1 << (x_bits - pl_scale - 1))
         max_val = (1 << (x_bits - 1)) - 1
-        x = np.clip(x, min_val, max_val)
+        clipped_x = np.clip(shifted_x, min_val, max_val)
         
-        return x
+        return clipped_x
 
     def shift_round(self, n, s):
         """
-        Bitwise implementation of shift_round, matching the C macro exactly
+        Bitwise implementation of shift_round, matching the C macro exactly.
+        This performs round-half-to-even.
         """
         if s <= 0:
             return n
         
-        # For positive numbers: add 2^(s-1) before shifting (rounds half up)
-        # For negative numbers: need to handle sign extension carefully
-        if n >= 0:
-            return (n + (1 << (s - 1))) >> s
-        else:
-            # For negative numbers, Python's >> is arithmetic shift (sign-extending)
-            return (n + (1 << (s - 1))) >> s
+        # This logic replicates the C macro:
+        # (((n) + ((s)>0 ? (1<<((s)-1)) - (~((n)>>(s))&1) : 0)) >> s)
+        correction = (~(n >> s)) & 1
+        term = (1 << (s - 1)) - correction
+        return (n + term) >> s
 
     def div_round(self, a, b):
         """
         Implements the exact C runtime div_round behavior:
         div_round(a, b) = (((a)+((b)/2) - (~((b)|(a)/(b)) &1))/(b))
+        This translates to "round half to nearest even" (banker's rounding).
         """
         if b == 0:
             raise ZeroDivisionError("Division by zero")
         
-        # Add half the divisor for rounding, but handle sign correctly
-        if (a >= 0) == (b >= 0):  # same sign
-            return (a + b // 2) // b
-        else:  # different signs
-            return (a - b // 2) // b
+        # This logic is a direct translation of the C macro.
+        quotient = a // b
+        correction = (~(b | quotient)) & 1
+        numerator = a + (b // 2) - correction
+        
+        return numerator // b
 
 
     def _perform_pooling_and_packing(self, nhwc_buf, o_buf, b):
@@ -609,9 +610,6 @@ class DeepSoCFlowPYNQ:
             actual_size = processed_data.size
             expected_size = pb['n'] * pb['oh'] * pb['ow'] * pb['co']  # Use 'oh', 'ow' not 'ch', 'cw'
             
-            print(f"DEBUG: processed_data.size={actual_size}, expected_size={expected_size}")
-            print(f"DEBUG: pb dimensions n={pb['n']}, oh={pb['oh']}, ow={pb['ow']}, co={pb['co']}")
-            
             if actual_size != expected_size:
                 print(f"WARNING: Size mismatch! Using actual size to infer dimensions")
                 # Try to infer correct dimensions
@@ -628,7 +626,6 @@ class DeepSoCFlowPYNQ:
             data = processed_data
             n, h, w, c = data.shape
         
-        print(f"DEBUG: Final data shape: {data.shape}")
         
         x_bits = 1 << self.defines['X_BITS_L2']
         x_words_per_byte = 8 // x_bits
