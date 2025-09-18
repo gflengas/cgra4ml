@@ -323,6 +323,10 @@ class DeepSoCFlowPYNQ:
 
             p_out_buffer = self.mem['y'] if ib == len(self.bundles) - 1 else self.mem['out_buffers'][b['out_buffer_idx']]
 
+            # For intermediate layers, the output buffer is reused. We must clear it before writing.
+            if ib < len(self.bundles) - 1:
+                p_out_buffer.fill(0)
+
             for ip in range(b['p']):
                 for it in range(b['t']):
                     it_bias = b['b_offset'] + b['coe'] * it
@@ -420,15 +424,167 @@ class DeepSoCFlowPYNQ:
                                                 out_val = np.int32(out_val) + np.int32(add_val)
                                                 out_val = self._quant_lrelu(out_val, b['aa_nzero'], b['aa_shift'], b['aa_pl_scale'])
                                             
-                                            # This is where the C code does tile_write, but that is complex.
-                                            # A better approach is to assemble the full NHWC buffer first,
-                                            # then do pooling and packing once at the end of the bundle.
-                                            final_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
-                                            if final_iy_nhwc < nhwc_buf.size:
-                                                nhwc_buf[final_iy_nhwc] = out_val
+                                            # --- SOFTMAX ---
+                                            if b.get('is_softmax', False):
+                                                assert b['ib'] == len(self.bundles) - 1, "Softmax is only allowed for the last bundle."
+
+                                                # De-quantize and apply exp, matching the C-runtime
+                                                val = float(out_val)
+                                                val /= (1 << b['softmax_frac'])
+                                                val -= b['softmax_max_f']
+                                                val = np.exp(val)
                                                 
-                                                # --- STORE FOR RESIDUAL ADD (missing from PyNQ driver!) ---
-                                                if b.get('add_out_buffer_idx', -1) != -1:
+                                                # Store intermediate exp() value
+                                                nhwc_buf[iy_nhwc] = val
+
+                                                # When the last channel for a pixel is processed, normalize
+                                                if i_yc == b['co'] - 1:
+                                                    sum_exp = 0.0
+                                                    # Sum exponentiated values across all channels for the current pixel
+                                                    for i in range(b['co']):
+                                                        iy_nhwc_sum = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
+                                                        sum_exp += nhwc_buf[iy_nhwc_sum]
+                                                    
+                                                    # Normalize by dividing by the sum
+                                                    if sum_exp != 0:
+                                                        for i in range(b['co']):
+                                                            iy_nhwc_norm = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
+                                                            nhwc_buf[iy_nhwc_norm] /= sum_exp
+                                                
+                                                # Skip the rest of the processing for this value, similar to 'goto' in C
+                                                continue
+                                            
+                                            # --- MAX/AVG POOL ---
+                                            if b['pool'] != 'POOL_NONE':
+                                                # Store the processed value in the NHWC buffer for pooling
+                                                iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+                                                nhwc_buf[iy_nhwc] = out_val
+
+                                                # Determine the output pooling grid coordinates (ixh_beg, ixw_beg)
+                                                # that this input pixel (i_yh, i_yw) might complete.
+                                                ixh_beg, rem_ixh = divmod(i_yh + b['psh_shift'] - b['pkh'] + 1, b['psh'])
+                                                ixw_beg, rem_ixw = divmod(i_yw + b['psw_shift'] - b['pkw'] + 1, b['psw'])
+
+                                                if ixh_beg < 0 or ixw_beg < 0:
+                                                    continue # Skip if target coordinates are out of bounds
+
+                                                # This logic determines if a pooling window calculation can be triggered.
+                                                # It only proceeds if the current pixel is at the bottom-right of a stride window,
+                                                # or if it's the very last pixel in a row/column, which triggers a sweep-up.
+                                                if rem_ixh != 0:
+                                                    if i_yh == yh - 1: ixh_beg += 1
+                                                    else: continue
+                                                if rem_ixw != 0:
+                                                    if i_yw == yw - 1: ixw_beg += 1
+                                                    else: continue
+
+                                                # Define the pooling window boundaries
+                                                ph_end = i_yh
+                                                pw_end = i_yw
+                                                ph_beg_const = max(b['psh'] * ixh_beg - b['psh_shift'], 0) - 1
+                                                pw_beg_const = max(b['psw'] * ixw_beg - b['psw_shift'], 0) - 1
+
+                                                # Determine how many output pixels to compute. Usually 1, but can be more at image edges.
+                                                xh_sweep = b['oh'] if i_yh == yh - 1 else ixh_beg + 1
+                                                xw_sweep = b['ow'] if i_yw == yw - 1 else ixw_beg + 1
+                                                
+                                                # Sweep the pooling window across the output grid
+                                                ph_beg = ph_beg_const
+                                                for ixh in range(ixh_beg, xh_sweep):
+                                                    pw_beg = pw_beg_const
+                                                    for ixw in range(ixw_beg, xw_sweep):
+                                                        # Traverse the window to find max or sum
+                                                        result = -2147483648 if b['pool'] == 'POOL_MAX' else 0
+                                                        count = 0
+                                                        for ipyh in range(ph_beg + 1, ph_end + 1):
+                                                            for ipyw in range(pw_beg + 1, pw_end + 1):
+                                                                read_idx = self._flatten_nhwc(i_yn, ipyh, ipyw, i_yc, yn, yh, yw, yc)
+                                                                read_val = nhwc_buf[read_idx]
+                                                                result = max(result, read_val) if b['pool'] == 'POOL_MAX' else (result + read_val)
+                                                                count += 1
+                                                        
+                                                        # Finalize AVG pool and apply activation
+                                                        if b['pool'] == 'POOL_AVG':
+                                                            result = self.div_round(result, count) if count > 0 else 0
+                                                            result = self._quant_lrelu(result, b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'])
+                                                        
+                                                        # --- TILE WRITE (Inlined) ---
+                                                        # This logic takes the pooled 'result' and writes it to the
+                                                        # correct tiled position in the output buffer.
+                                                        if b.get('ib_out', -1) != -1:
+                                                            pb_out = self.bundles[b['ib_out']]
+                                                            
+                                                            yp_first = i_yc < pb_out['cm_p0']
+                                                            i_yr = ixh % self.defines['PE_ROWS']
+                                                            i_yl = ixh // self.defines['PE_ROWS']
+                                                            
+                                                            if yp_first:
+                                                                i_yp, i_ycm, ycm = 0, i_yc, pb_out['cm_p0']
+                                                            else:
+                                                                i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
+                                                                i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
+                                                                ycm = pb_out['cm']
+                                                            
+                                                            p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
+                                                            pe_rows = self.defines['PE_ROWS']
+                                                            flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + ixw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
+                                                            
+                                                            x_bits = 1 << self.defines['X_BITS_L2']
+                                                            x_words_per_byte = 8 // x_bits
+                                                            byte_idx = flat_index // x_words_per_byte
+                                                            bit_offset = (flat_index % x_words_per_byte) * x_bits
+                                                            
+                                                            if byte_idx < p_out_buffer.size:
+                                                                mask = (1 << x_bits) - 1
+                                                                p_out_buffer[byte_idx] |= (int(result) & mask) << bit_offset
+                                                        
+                                                        pw_beg += b['psw']
+                                                    ph_beg += b['psh']
+                                                
+                                                continue # Skip final NHWC store, as output is written directly
+                                            
+                                            # --- NO POOLING: TILE WRITE OR FINAL STORE ---
+                                            is_last_bundle = (b['ib'] == len(self.bundles) - 1)
+                                            
+                                            if is_last_bundle:
+                                                # For the last bundle without pooling, write to the final output buffer (nhwc_buf)
+                                                final_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
+                                                if final_iy_nhwc < nhwc_buf.size:
+                                                    nhwc_buf[final_iy_nhwc] = out_val
+                                            else:
+                                                # For intermediate bundles without pooling, perform a tile_write
+                                                if b.get('ib_out', -1) != -1:
+                                                    pb_out = self.bundles[b['ib_out']]
+                                                    
+                                                    # Use post-stride coordinates i_yh, i_yw
+                                                    yp_first = i_yc < pb_out['cm_p0']
+                                                    i_yr = i_yh % self.defines['PE_ROWS']
+                                                    i_yl = i_yh // self.defines['PE_ROWS']
+                                                    
+                                                    if yp_first:
+                                                        i_yp, i_ycm, ycm = 0, i_yc, pb_out['cm_p0']
+                                                    else:
+                                                        i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
+                                                        i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
+                                                        ycm = pb_out['cm']
+                                                    
+                                                    p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
+                                                    pe_rows = self.defines['PE_ROWS']
+                                                    flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + i_yw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
+                                                    
+                                                    x_bits = 1 << self.defines['X_BITS_L2']
+                                                    x_words_per_byte = 8 // x_bits
+                                                    byte_idx = flat_index // x_words_per_byte
+                                                    bit_offset = (flat_index % x_words_per_byte) * x_bits
+                                                    
+                                                    if byte_idx < p_out_buffer.size:
+                                                        mask = (1 << x_bits) - 1
+                                                        p_out_buffer[byte_idx] |= (int(out_val) & mask) << bit_offset
+
+                                            # --- STORE FOR RESIDUAL ADD ---
+                                            if b.get('add_out_buffer_idx', -1) != -1:
+                                                final_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
+                                                if final_iy_nhwc < self.mem['add_buffers'][b['add_out_buffer_idx']].size:
                                                     self.mem['add_buffers'][b['add_out_buffer_idx']][final_iy_nhwc] = np.int8(out_val)
                                 
                                 # --- Signal Done Reading ---
@@ -441,7 +597,7 @@ class DeepSoCFlowPYNQ:
             print(f"[{', '.join(map(str, y_sum_sim_log))}]")
             
 
-            self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
+            # self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
             # --- Print final output of the bundle ---
             print(f"Final output of the bundle ({ib}_y_tiled_sim.txt):")
             x_bits = 1 << self.defines['X_BITS_L2']
@@ -457,7 +613,7 @@ class DeepSoCFlowPYNQ:
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
 
         # --- Print Final Model Output ---
-        final_output = self._get_final_output()
+        # final_output = self._get_final_output()
         
         end_time = time.time()
         print(f"\n--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
@@ -465,7 +621,7 @@ class DeepSoCFlowPYNQ:
         # Reset accelerator start signal now that inference is complete
         # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         
-        return final_output
+        return nhwc_buf
 
     def _flatten_nhwc(self, in_val, ih, iw, ic, N, H, W, C):
         """
@@ -513,209 +669,31 @@ class DeepSoCFlowPYNQ:
 
     def div_round(self, a, b):
         """
-        Implements the exact C runtime div_round behavior:
+        Implements the exact C runtime div_round behavior by emulating
+        32-bit signed integer arithmetic.
         div_round(a, b) = (((a)+((b)/2) - (~((b)|(a)/(b)) &1))/(b))
         This translates to "round half to nearest even" (banker's rounding).
         """
         if b == 0:
             raise ZeroDivisionError("Division by zero")
         
-        # This logic is a direct translation of the C macro.
-        quotient = a // b
-        correction = (~(b | quotient)) & 1
+        # Emulate C's signed 32-bit integer division and bitwise operations
+        a = np.int32(a)
+        b = np.int32(b)
+        
+        quotient = np.int32(a // b)
+        
+        # Perform bitwise operations as 32-bit integers
+        b_or_quotient = np.int32(b | quotient)
+        not_b_or_quotient = np.int32(~b_or_quotient)
+        
+        correction = not_b_or_quotient & 1
+        
         numerator = a + (b // 2) - correction
         
-        return numerator // b
+        return np.int32(numerator // b)
 
 
-    def _perform_pooling_and_packing(self, nhwc_buf, o_buf, b):
-        """
-        Performs the final pooling, flattening, and packing operations on the
-        fully assembled NHWC buffer for a bundle.
-        """
-        if b.get('is_flatten', False):
-            valid_data_size = b['n'] * b['ch'] * b['cw'] * b['co']
-            processed_data = nhwc_buf[:valid_data_size]
-        else:
-            # Reshape based on post-stride dimensions, which are now correctly
-            # stored in the dense nhwc_buf.
-            valid_data_size = b['n'] * b['ch'] * b['cw'] * b['co']
-            img = nhwc_buf[:valid_data_size].reshape(b['n'], b['ch'], b['cw'], b['co'])
-
-            if b['pool'] != 'POOL_NONE':
-                pooled_rows = b['oh']
-                pooled_cols = b['ow']
-                pooled_img = np.zeros((b['n'], pooled_rows, pooled_cols, b['co']), dtype=np.int32)
-                
-                for r in range(pooled_rows):
-                    for c in range(pooled_cols):
-                        r_start, c_start = r * b['psh'], c * b['psw']
-                        r_end, c_end = r_start + b['pkh'], c_start + b['pkw']
-                        window = img[:, r_start:r_end, c_start:c_end, :]
-                        
-                        if b['pool'] == 'POOL_MAX':
-                            pooled_img[:, r, c, :] = np.max(window, axis=(1, 2))
-                        elif b['pool'] == 'POOL_AVG':
-                            # Calculate sum first, then use div_round like C runtime
-                            window_sum = np.sum(window, axis=(1, 2))
-                            count = window.shape[1] * window.shape[2]  # window size
-                            avg_val = np.array([self.div_round(int(s), count) for s in window_sum.flatten()])
-                            avg_val = avg_val.reshape(window_sum.shape)
-                            
-                            # Apply activation function like C runtime does
-                            x_bits = 1 << self.defines['X_BITS_L2']
-                            activated_val = np.array([
-                                self._quant_lrelu(int(val), b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'])
-                                for val in avg_val.flatten()
-                            ]).reshape(avg_val.shape)
-                            
-                            pooled_img[:, r, c, :] = activated_val
-                
-                processed_data = pooled_img
-            else:
-                processed_data = img
-
-        is_last_bundle = (b['ib'] == len(self.bundles) - 1)
-
-        if is_last_bundle:
-            # For the final output, we do not pack. The data is int32.
-            # o_buf is self.mem['y'] which is already of the correct dtype.
-            output_words = processed_data.flatten()
-            np.copyto(o_buf[:output_words.size], output_words)
-        else:
-            # FOR INTERMEDIATE BUNDLES: Use tiling instead of NHWC flattening
-            if b.get('ib_out', -1) != -1:
-                pb_out = self.bundles[b['ib_out']]
-                self._write_tiled_output(processed_data, o_buf, b, pb_out)
-            else:
-                # Fallback to NHWC if no output bundle
-                output_words = processed_data.flatten()
-                x_bits = 1 << self.defines['X_BITS_L2']
-                packed_bytes = pack_words_into_bytes(output_words, x_bits)
-                packed_as_dtype = np.frombuffer(packed_bytes, dtype=o_buf.dtype)
-                np.copyto(o_buf[:packed_as_dtype.size], packed_as_dtype)
-
-        o_buf.flush()
-
-    def _write_tiled_output(self, processed_data, o_buf, pb, pb_out):
-        """
-        Write processed data in tiled format expected by next bundle
-        """
-        o_buf.fill(0)  # Clear buffer
-        
-        # Get dimensions
-        if len(processed_data.shape) == 1:
-            # Flattened data, reshape it using ACTUAL output dimensions
-            # For bundle 0, this should be the post-stride, post-pooling dimensions
-            actual_size = processed_data.size
-            expected_size = pb['n'] * pb['oh'] * pb['ow'] * pb['co']  # Use 'oh', 'ow' not 'ch', 'cw'
-            
-            if actual_size != expected_size:
-                print(f"WARNING: Size mismatch! Using actual size to infer dimensions")
-                # Try to infer correct dimensions
-                if actual_size == pb['n'] * pb['ch'] * pb['cw'] * pb['co']:
-                    data = processed_data.reshape(pb['n'], pb['ch'], pb['cw'], pb['co'])
-                    n, h, w, c = pb['n'], pb['ch'], pb['cw'], pb['co']
-                else:
-                    data = processed_data.reshape(pb['n'], pb['oh'], pb['ow'], pb['co'])
-                    n, h, w, c = pb['n'], pb['oh'], pb['ow'], pb['co']
-            else:
-                data = processed_data.reshape(pb['n'], pb['oh'], pb['ow'], pb['co'])
-                n, h, w, c = pb['n'], pb['oh'], pb['ow'], pb['co']
-        else:
-            data = processed_data
-            n, h, w, c = data.shape
-        
-        
-        x_bits = 1 << self.defines['X_BITS_L2']
-        x_words_per_byte = 8 // x_bits
-        
-        # Iterate through all output positions using ACTUAL dimensions
-        for i_yn in range(n):
-            for i_yh in range(h):
-                for i_yw in range(w):
-                    for i_yc in range(c):
-                        out_val = int(data[i_yn, i_yh, i_yw, i_yc])
-                        
-                        # Calculate tiled coordinates (matching C tile_write)
-                        yp_first = i_yc < pb_out['cm_p0']
-                        
-                        i_yr = i_yh % self.defines['PE_ROWS']
-                        i_yl = i_yh // self.defines['PE_ROWS']
-                        
-                        if yp_first:
-                            i_yp = 0
-                            i_ycm = i_yc
-                            ycm = pb_out['cm_p0']
-                        else:
-                            i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
-                            i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
-                            ycm = pb_out['cm']
-                        
-                        # Calculate flat index in tiled format
-                        p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
-                        pe_rows = self.defines['PE_ROWS']
-                        flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + i_yw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
-                        
-                        # Pack and store
-                        byte_idx = flat_index // x_words_per_byte
-                        bit_offset = (flat_index % x_words_per_byte) * x_bits
-                        
-                        if byte_idx < len(o_buf):
-                            mask = (1 << x_bits) - 1
-                            o_buf[byte_idx] |= (out_val & mask) << bit_offset
-
-    def _get_final_output(self):
-        """
-        Reads the final output buffer, applies softmax if needed, and returns the result.
-        """
-        last_bundle = self.bundles[-1]
-        
-        # The final output buffer self.mem['y'] contains the raw integer words.
-        final_output_words = self.mem['y']
-        
-        # Apply softmax if this is the last layer
-        if last_bundle['is_softmax']:
-            # De-quantize the output words according to C-runtime logic
-            softmax_frac = last_bundle['softmax_frac']
-            softmax_max_f = last_bundle['softmax_max_f']
-            
-            # Perform operations on a float copy
-            float_words = final_output_words.astype(np.float32)
-            float_words /= (1 << softmax_frac)
-            float_words -= softmax_max_f
-            
-            # Reshape to apply softmax along the channel axis, mimicking the C-runtime.
-            # The C-runtime applies softmax per-pixel, over the channel dimension.
-            num_classes = last_bundle['co']
-            if num_classes == 0:
-                final_output = float_words # Avoid division by zero
-            else:
-                num_vectors = last_bundle['o_words'] // num_classes
-                
-                if num_vectors * num_classes != last_bundle['o_words']:
-                    # Fallback for unexpected shapes, though this indicates a config issue.
-                    exp_values = np.exp(float_words)
-                    sum_exp_values = np.sum(exp_values)
-                    final_output = exp_values / sum_exp_values if sum_exp_values != 0 else exp_values
-                else:
-                    valid_words = float_words[:last_bundle['o_words']]
-                    reshaped_words = valid_words.reshape((num_vectors, num_classes))
-
-                    exp_values = np.exp(reshaped_words)
-                    sum_exp_values = np.sum(exp_values, axis=1, keepdims=True)
-
-                    # Avoid division by zero with a more robust approach
-                    # Set a minimum threshold to avoid numerical issues
-                    sum_exp_values = np.maximum(sum_exp_values, 1e-10)
-                    final_output_reshaped = exp_values / sum_exp_values
-                    final_output = final_output_reshaped.flatten()
-        else:
-            final_output = final_output_words
-
-        # Return only the valid part of the output buffer
-        return final_output[:last_bundle['o_words']]
-        
     def __del__(self):
         print("\nReleasing memory buffers.")
         for name, buf in self.mem.items():
