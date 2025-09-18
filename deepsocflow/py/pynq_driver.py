@@ -436,8 +436,9 @@ class DeepSoCFlowPYNQ:
                                                 val -= b['softmax_max_f']
                                                 val = np.exp(val)
                                                 
-                                                # Store intermediate exp() value
-                                                nhwc_buf[iy_nhwc] = val
+                                                # Store intermediate exp() value in the final float output buffer
+                                                iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+                                                self.mem['y'][iy_nhwc] = val
 
                                                 # When the last channel for a pixel is processed, normalize
                                                 if i_yc == b['co'] - 1:
@@ -445,13 +446,13 @@ class DeepSoCFlowPYNQ:
                                                     # Sum exponentiated values across all channels for the current pixel
                                                     for i in range(b['co']):
                                                         iy_nhwc_sum = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
-                                                        sum_exp += nhwc_buf[iy_nhwc_sum]
+                                                        sum_exp += self.mem['y'][iy_nhwc_sum]
                                                     
                                                     # Normalize by dividing by the sum
                                                     if sum_exp != 0:
                                                         for i in range(b['co']):
                                                             iy_nhwc_norm = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
-                                                            nhwc_buf[iy_nhwc_norm] /= sum_exp
+                                                            self.mem['y'][iy_nhwc_norm] /= sum_exp
                                                 
                                                 # Skip the rest of the processing for this value, similar to 'goto' in C
                                                 continue
@@ -554,10 +555,14 @@ class DeepSoCFlowPYNQ:
             # self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
             # --- Print final output of the bundle ---
             print(f"Final output of the bundle ({ib}_y_tiled_sim.txt):")
-            x_bits = 1 << self.defines['X_BITS_L2']
-            # Slice the buffer to the actual size to prevent reading stale data
-            valid_output_bytes = p_out_buffer[:b['o_bytes']]
-            processed_output = unpack_bytes_into_words(valid_output_bytes.tobytes(), x_bits)
+            if b.get('is_softmax', False):
+                # For softmax, the output is in self.mem['y'] as floats
+                processed_output = self.mem['y']
+            else:
+                x_bits = 1 << self.defines['X_BITS_L2']
+                # Slice the buffer to the actual size to prevent reading stale data
+                valid_output_bytes = p_out_buffer[:b['o_bytes']]
+                processed_output = unpack_bytes_into_words(valid_output_bytes.tobytes(), x_bits)
             print(f"[{', '.join(map(str, processed_output))}]")
             
             # --- Signal Bundle Done ---
@@ -572,6 +577,9 @@ class DeepSoCFlowPYNQ:
         # Reset accelerator start signal now that inference is complete
         # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         
+        # Return the correct final output buffer
+        if self.bundles[-1].get('is_softmax', False):
+            return self.mem['y']
         return nhwc_buf
 
     def _tile_write(self, out_val, p_out_buffer, pb, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc):
