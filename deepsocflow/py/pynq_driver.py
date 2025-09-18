@@ -510,39 +510,17 @@ class DeepSoCFlowPYNQ:
                                                             result = self.div_round(result, count) if count > 0 else 0
                                                             result = self._quant_lrelu(result, b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'])
                                                         
-                                                        # --- TILE WRITE (Inlined) ---
+                                                        # --- TILE WRITE ---
                                                         # This logic takes the pooled 'result' and writes it to the
-                                                        # correct tiled position in the output buffer.
-                                                        if b.get('ib_out', -1) != -1:
-                                                            pb_out = self.bundles[b['ib_out']]
-                                                            
-                                                            yp_first = i_yc < pb_out['cm_p0']
-                                                            i_yr = ixh % self.defines['PE_ROWS']
-                                                            i_yl = ixh // self.defines['PE_ROWS']
-                                                            
-                                                            if yp_first:
-                                                                i_yp, i_ycm, ycm = 0, i_yc, pb_out['cm_p0']
-                                                            else:
-                                                                i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
-                                                                i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
-                                                                ycm = pb_out['cm']
-                                                            
-                                                            p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
-                                                            pe_rows = self.defines['PE_ROWS']
-                                                            flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + ixw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
-                                                            
-                                                            x_bits = 1 << self.defines['X_BITS_L2']
-                                                            x_words_per_byte = 8 // x_bits
-                                                            byte_idx = flat_index // x_words_per_byte
-                                                            bit_offset = (flat_index % x_words_per_byte) * x_bits
-                                                            
-                                                            if byte_idx < p_out_buffer.size:
-                                                                mask = (1 << x_bits) - 1
-                                                                p_out_buffer[byte_idx] |= (int(result) & mask) << bit_offset
+                                                        # correct tiled position in the output buffer, matching the C runtime.
+                                                        self._tile_write(result, p_out_buffer, b, i_yn, ixh, ixw, i_yc, yn, b['ph'], b['pw'], yc)
                                                         
                                                         _pw_beg += b['psw']
                                                     _ph_beg += b['psh']
                                                 
+                                                # Update yh and yw to post-pooling dimensions to match C runtime
+                                                yh = b['ph']
+                                                yw = b['pw']
                                                 continue # Skip final NHWC store, as output is written directly
                                             
                                             # --- NO POOLING: TILE WRITE OR FINAL STORE ---
@@ -555,34 +533,8 @@ class DeepSoCFlowPYNQ:
                                                     nhwc_buf[final_iy_nhwc] = out_val
                                             else:
                                                 # For intermediate bundles without pooling, perform a tile_write
-                                                if b.get('ib_out', -1) != -1:
-                                                    pb_out = self.bundles[b['ib_out']]
-                                                    
-                                                    # Use post-stride coordinates i_yh, i_yw
-                                                    yp_first = i_yc < pb_out['cm_p0']
-                                                    i_yr = i_yh % self.defines['PE_ROWS']
-                                                    i_yl = i_yh // self.defines['PE_ROWS']
-                                                    
-                                                    if yp_first:
-                                                        i_yp, i_ycm, ycm = 0, i_yc, pb_out['cm_p0']
-                                                    else:
-                                                        i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
-                                                        i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
-                                                        ycm = pb_out['cm']
-                                                    
-                                                    p_offset = 0 if i_yp == 0 else (pb_out['cm_p0'] + (i_yp - 1) * pb_out['cm']) * pb_out['xp_words']
-                                                    pe_rows = self.defines['PE_ROWS']
-                                                    flat_index = p_offset + (((i_yn * pb_out['l'] + i_yl) * pb_out['w'] + i_yw) * ycm + i_ycm) * (pe_rows + pb_out['x_pad']) + i_yr
-                                                    
-                                                    x_bits = 1 << self.defines['X_BITS_L2']
-                                                    x_words_per_byte = 8 // x_bits
-                                                    byte_idx = flat_index // x_words_per_byte
-                                                    bit_offset = (flat_index % x_words_per_byte) * x_bits
-                                                    
-                                                    if byte_idx < p_out_buffer.size:
-                                                        mask = (1 << x_bits) - 1
-                                                        p_out_buffer[byte_idx] |= (int(out_val) & mask) << bit_offset
-
+                                                self._tile_write(out_val, p_out_buffer, b, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+                                            
                                             # --- STORE FOR RESIDUAL ADD ---
                                             if b.get('add_out_buffer_idx', -1) != -1:
                                                 final_iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, b['n'], b['ch'], b['cw'], b['co'])
@@ -621,6 +573,83 @@ class DeepSoCFlowPYNQ:
         # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
         
         return nhwc_buf
+
+    def _tile_write(self, out_val, p_out_buffer, pb, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc):
+        """
+        Exactly matches the C runtime tile_write function, including padding and sweeping.
+        """
+        # In Python, we handle flatten before this would be called if needed.
+        # This function assumes standard NHWC inputs that need tiling.
+
+        # Store for residual add if needed
+        if pb.get('add_out_buffer_idx', -1) != -1:
+            iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, pb['on'], pb['oh'], pb['ow'], pb['oc'])
+            if iy_nhwc < self.mem['add_buffers'][pb['add_out_buffer_idx']].size:
+                self.mem['add_buffers'][pb['add_out_buffer_idx']][iy_nhwc] = np.int8(out_val)
+
+        # If output only goes to residual add, early return
+        if pb.get('ib_out', -1) == -1:
+            return
+        
+        pb_out = self.bundles[pb['ib_out']]
+
+        # TILING: Calculate X coordinates
+        yp_first = i_yc < pb_out['cm_p0']
+        i_yr = i_yh % self.defines['PE_ROWS']
+        i_yl = i_yh // self.defines['PE_ROWS']
+        
+        if yp_first:
+            i_yp, i_ycm, ycm = 0, i_yc, pb_out['cm_p0']
+        else:
+            i_yp = (i_yc - pb_out['cm_p0']) // pb_out['cm'] + 1
+            i_ycm = (i_yc - pb_out['cm_p0']) % pb_out['cm']
+            ycm = pb_out['cm']
+
+        # STORE FOR NEXT BUNDLE: Other bundles: pad & save as tiled
+        # The 'yh' passed here is the post-stride/post-pool height
+        yr_sweep = self.defines['PE_ROWS'] if i_yh == yh - 1 else i_yr + 1
+        
+        # Need to capture the original out_val for padding calculation
+        original_out_val = out_val
+
+        for i_yr_dest in range(i_yr, yr_sweep):
+            self._write_x(out_val, p_out_buffer, i_yp, i_yn, i_yl, i_yw, i_ycm, i_yr_dest, pb_out, ycm)
+
+            # PADDING: the [bottom x_pad rows of previous block (l-1)] with [first x_pad rows of this block (l)]
+            if i_yr_dest < pb_out['x_pad']:
+                pad_val = 0 if i_yl == 0 else original_out_val
+                dest_yl = pb_out['l'] - 1 if i_yl == 0 else i_yl - 1
+                self._write_x(pad_val, p_out_buffer, i_yp, i_yn, dest_yl, i_yw, i_ycm, i_yr_dest + self.defines['PE_ROWS'], pb_out, ycm)
+            
+            # Write zeros for the rest of the sweep
+            out_val = 0
+            
+    def _write_x(self, val, p_out_buffer, ixp, ixn, ixl, ixw, ixcm, ixr, pb_out, xcm):
+        """
+        Exactly matches the C runtime write_x function to pack and write a value
+        into the tiled output buffer.
+        """
+        p_offset = 0 if ixp == 0 else (pb_out['cm_p0'] + (ixp - 1) * pb_out['cm']) * pb_out['xp_words']
+        pe_rows_padded = self.defines['PE_ROWS'] + pb_out['x_pad']
+        flat_index = p_offset + (((ixn * pb_out['l'] + ixl) * pb_out['w'] + ixw) * xcm + ixcm) * pe_rows_padded + ixr
+
+        x_bits = 1 << self.defines['X_BITS_L2']
+        x_words_per_byte = 8 // x_bits
+        
+        if x_words_per_byte == 0: return # Avoid division by zero if x_bits > 8
+
+        byte_idx = flat_index // x_words_per_byte
+        bit_offset = (flat_index % x_words_per_byte) * x_bits
+        
+        if byte_idx < p_out_buffer.size:
+            mask = (1 << x_bits) - 1
+            # Read-modify-write to insert the new value
+            existing_byte = p_out_buffer[byte_idx]
+            # Create a mask to clear the bits we are about to set
+            clear_mask = ~(mask << bit_offset)
+            # Apply new value
+            new_byte = (existing_byte & clear_mask) | ((int(val) & mask) << bit_offset)
+            p_out_buffer[byte_idx] = new_byte
 
     def _flatten_nhwc(self, in_val, ih, iw, ic, N, H, W, C):
         """
