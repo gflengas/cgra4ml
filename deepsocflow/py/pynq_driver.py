@@ -405,6 +405,8 @@ class DeepSoCFlowPYNQ:
 
                                             i_yh = (i_yh - b['csh_shift']) // b['csh']
                                             i_yw = (i_yw - b['csw_shift']) // b['csw']
+                                            yh = b['ch']
+                                            yw = b['cw']
                                             # --- ADD BIAS ---
                                             if b.get('is_bias', False):
                                                 bias = np.int16(self.mem['b'][i_bias])
@@ -489,15 +491,15 @@ class DeepSoCFlowPYNQ:
                                                 xw_sweep = b['ow'] if i_yw == yw - 1 else ixw_beg + 1
                                                 
                                                 # Sweep the pooling window across the output grid
-                                                ph_beg = ph_beg_const
+                                                _ph_beg = ph_beg_const
                                                 for ixh in range(ixh_beg, xh_sweep):
-                                                    pw_beg = pw_beg_const
+                                                    _pw_beg = pw_beg_const
                                                     for ixw in range(ixw_beg, xw_sweep):
                                                         # Traverse the window to find max or sum
                                                         result = -2147483648 if b['pool'] == 'POOL_MAX' else 0
                                                         count = 0
-                                                        for ipyh in range(ph_beg + 1, ph_end + 1):
-                                                            for ipyw in range(pw_beg + 1, pw_end + 1):
+                                                        for ipyh in range(_ph_beg + 1, ph_end + 1):
+                                                            for ipyw in range(_pw_beg + 1, pw_end + 1):
                                                                 read_idx = self._flatten_nhwc(i_yn, ipyh, ipyw, i_yc, yn, yh, yw, yc)
                                                                 read_val = nhwc_buf[read_idx]
                                                                 result = max(result, read_val) if b['pool'] == 'POOL_MAX' else (result + read_val)
@@ -538,8 +540,8 @@ class DeepSoCFlowPYNQ:
                                                                 mask = (1 << x_bits) - 1
                                                                 p_out_buffer[byte_idx] |= (int(result) & mask) << bit_offset
                                                         
-                                                        pw_beg += b['psw']
-                                                    ph_beg += b['psh']
+                                                        _pw_beg += b['psw']
+                                                    _ph_beg += b['psh']
                                                 
                                                 continue # Skip final NHWC store, as output is written directly
                                             
@@ -606,9 +608,6 @@ class DeepSoCFlowPYNQ:
             processed_output = unpack_bytes_into_words(valid_output_bytes.tobytes(), x_bits)
             print(f"[{', '.join(map(str, processed_output))}]")
             
-            # --- Tiled Output ---
-            
-            
             # --- Signal Bundle Done ---
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
 
@@ -655,17 +654,23 @@ class DeepSoCFlowPYNQ:
 
     def shift_round(self, n, s):
         """
-        Bitwise implementation of shift_round, matching the C macro exactly.
+        Bitwise implementation of shift_round, matching the C macro exactly by
+        emulating 32-bit signed integer arithmetic.
         This performs round-half-to-even.
         """
         if s <= 0:
             return n
         
+        # Emulate C's signed 32-bit integer arithmetic for consistency
+        n = np.int32(n)
+        s = np.int32(s)
+
         # This logic replicates the C macro:
         # (((n) + ((s)>0 ? (1<<((s)-1)) - (~((n)>>(s))&1) : 0)) >> s)
-        correction = (~(n >> s)) & 1
-        term = (1 << (s - 1)) - correction
-        return (n + term) >> s
+        n_shifted = np.int32(n >> s)
+        correction = np.int32((~n_shifted) & 1)
+        term = np.int32((1 << (s - 1)) - correction)
+        return np.int32((n + term) >> s)
 
     def div_round(self, a, b):
         """
