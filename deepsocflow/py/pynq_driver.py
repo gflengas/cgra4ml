@@ -578,8 +578,18 @@ class DeepSoCFlowPYNQ:
         """
         Exactly matches the C runtime tile_write function, including padding and sweeping.
         """
-        # In Python, we handle flatten before this would be called if needed.
-        # This function assumes standard NHWC inputs that need tiling.
+        # --- FLATTEN ---
+        if pb.get('is_flatten', False):
+            # Recalculate indices and dimensions to flatten the tensor, matching the C logic.
+            i_yc = (i_yh * yw + i_yw) * yc + i_yc
+            i_yw = 0
+            i_yh = i_yn
+            i_yn = 0
+
+            yc = yh * yw * yc
+            yw = 1
+            yh = yn
+            yn = 1
 
         # Store for residual add if needed
         if pb.get('add_out_buffer_idx', -1) != -1:
