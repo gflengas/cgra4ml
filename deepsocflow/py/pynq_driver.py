@@ -90,8 +90,8 @@ class DeepSoCFlowPYNQ:
         self.bundles = config['bundles']
 
         # Add the bundle index 'ib' to each bundle for easier debugging.
-        for i, b in enumerate(self.bundles):
-            b['ib'] = i
+        # for i, b in enumerate(self.bundles):
+        #     b['ib'] = i
 
         self.mem = {}
         
@@ -297,30 +297,11 @@ class DeepSoCFlowPYNQ:
         ocm_bank = 1  # Will be flipped to 0 at the start of the first loop
 
         for ib, b in enumerate(self.bundles):
-            print(f"--- Bundle {ib} ---")
-            
-            # --- DEBUG: Print the input buffer for this bundle ---
-            in_buffer_idx = b.get('in_buffer_idx', -1)
-            if in_buffer_idx == -1:
-                input_buf = self.mem['x']
-            else:
-                input_buf = self.mem['out_buffers'][in_buffer_idx]
-            
-            x_bits = 1 << self.defines['X_BITS_L2']
-            unpacked_input = unpack_bytes_into_words(input_buf.tobytes(), x_bits)
-            print(f"Inputs ({ib}_xe.txt):")
-            print(f"[{', '.join(map(str, unpacked_input[:16]))}]")
-            # --- End DEBUG Print ---
-            
             # This buffer will hold the fully assembled NHWC output for this layer
             nhwc_buf_shape = (b['n'], b['ch'], b['cw'], b['co'])
             nhwc_buf_size = np.prod(nhwc_buf_shape)
             nhwc_buf = np.zeros(nhwc_buf_size, dtype=np.int32)
             
-            # A sequential log to store the output after p-pass summing, to exactly
-            # mimic the C-runtime's `y_sum_sim.txt` debug output.
-            y_sum_sim_log = []
-
             p_out_buffer = self.mem['y'] if ib == len(self.bundles) - 1 else self.mem['out_buffers'][b['out_buffer_idx']]
 
             # For intermediate layers, the output buffer is reused. We must clear it before writing.
@@ -349,10 +330,6 @@ class DeepSoCFlowPYNQ:
                                 # Invalidate the entire base buffer to ensure cache coherency
                                 self.mem['ocm'][ocm_bank].sync_from_device()
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
-                                print(f"OCM Raw Output ({ib}_{ip}_{it}_y_raw_sim.txt):")
-                                # ocm_values = np.int32(self.mem['ocm'][ocm_bank])
-                                # print(f"[{', '.join(map(str, ocm_values))}]")
-                                print(np.int32(self.mem['ocm'][ocm_bank][:valid_elements]))
 
                                 
                                 # --- Process OCM Data (Python side) ---
@@ -369,10 +346,7 @@ class DeepSoCFlowPYNQ:
                                             yn, yh, yw, yc = b['n'], b['h'], b['w'], b['co']
 
                                             if i_yh >= yh or i_yc >= yc:
-                                                # C-runtime prints a 0 for out-of-bounds on the last pass.
-                                                # The original `b['p'] > 1` check was incorrect.
-                                                if ip == b['p'] - 1:
-                                                    y_sum_sim_log.append(0)
+                                                # Skip out-of-bounds processing
                                                 sram_addr += 1
                                                 continue
                                             
@@ -395,9 +369,6 @@ class DeepSoCFlowPYNQ:
                                                 self.mem['nhwc'][iy_nhwc] += out_val
                                                 continue
                                             
-                                            # Log the value after summing is complete to match C behavior
-                                            y_sum_sim_log.append(out_val)
-
                                             # --- CONV STRIDING ---
                                             if (i_yh - b['csh_shift']) % b['csh'] != 0 or \
                                             (i_yw - b['csw_shift']) % b['csw'] != 0:
@@ -428,7 +399,7 @@ class DeepSoCFlowPYNQ:
                                             
                                             # --- SOFTMAX ---
                                             if b.get('is_softmax', False):
-                                                assert b['ib'] == len(self.bundles) - 1, "Softmax is only allowed for the last bundle."
+                                                assert ib == len(self.bundles) - 1, "Softmax is only allowed for the last bundle."
 
                                                 # De-quantize and apply exp, matching the C-runtime
                                                 val = float(out_val)
@@ -525,7 +496,7 @@ class DeepSoCFlowPYNQ:
                                                 continue # Skip final NHWC store, as output is written directly
                                             
                                             # --- NO POOLING: TILE WRITE OR FINAL STORE ---
-                                            is_last_bundle = (b['ib'] == len(self.bundles) - 1)
+                                            is_last_bundle = (ib == len(self.bundles) - 1)
                                             
                                             if is_last_bundle:
                                                 # For the last bundle without pooling, write to the final output buffer (nhwc_buf)
@@ -545,32 +516,9 @@ class DeepSoCFlowPYNQ:
                                 # --- Signal Done Reading ---
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_READ'] + ocm_bank) * 4, 1)
 
-            # --- Print OCM Summed Output ---
-            # This print statement now correctly shows the pre-processing summed output,
-            # matching the `y_sum_sim.txt` from the C simulation.
-            print(f"OCM Summed Output ({ib}_y_sum_sim.txt):")
-            print(f"[{', '.join(map(str, y_sum_sim_log))}]")
-            
-
-            # self._perform_pooling_and_packing(nhwc_buf, p_out_buffer, b)
-            # --- Print final output of the bundle ---
-            print(f"Final output of the bundle ({ib}_y_tiled_sim.txt):")
-            if b.get('is_softmax', False):
-                # For softmax, the output is in self.mem['y'] as floats
-                processed_output = self.mem['y']
-            else:
-                x_bits = 1 << self.defines['X_BITS_L2']
-                # Slice the buffer to the actual size to prevent reading stale data
-                valid_output_bytes = p_out_buffer[:b['o_bytes']]
-                processed_output = unpack_bytes_into_words(valid_output_bytes.tobytes(), x_bits)
-            print(f"[{', '.join(map(str, processed_output))}]")
-            
             # --- Signal Bundle Done ---
             self.mmio.write(self.REG_OFFSETS['A_BUNDLE_DONE'] * 4, 1)
 
-        # --- Print Final Model Output ---
-        # final_output = self._get_final_output()
-        
         end_time = time.time()
         print(f"\n--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
         
