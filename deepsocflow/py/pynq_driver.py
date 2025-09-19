@@ -1,62 +1,7 @@
 import pynq  # pyright: ignore[reportMissingImports]
 import numpy as np  # pyright: ignore[reportMissingImports]
 import json
-import os
 import time
-
-# --- Utility Functions (Ported from deepsocflow.py.utils and enhanced) ---
-def pack_words_into_bytes(arr, bits):
-    """Packs an array of integers (words) of specified bit-width into a byte array."""
-    if bits == 8:
-        return arr.astype(np.int8).tobytes()
-    elif bits < 8:
-        # Determine the correct dtype for intermediate calculations based on signedness
-        signed = np.any(arr < 0)
-        temp_dtype = np.int16 if signed else np.uint16
-        words_per_byte = 8 // bits
-        packed_size = (arr.size + words_per_byte - 1) // words_per_byte
-        packed_bytes = np.zeros(packed_size, dtype=np.uint8)
-        mask = (1 << bits) - 1
-
-        for i in range(arr.size):
-            byte_idx = i // words_per_byte
-            bit_offset = (i % words_per_byte) * bits
-            val = arr[i].astype(temp_dtype) & mask
-            packed_bytes[byte_idx] |= (val << bit_offset)
-        return packed_bytes.tobytes()
-
-def unpack_bytes_into_words(byte_arr, bits):
-    """
-    Unpacks a byte array into an array of integers (words) of specified bit-width,
-    correctly handling signed two's complement for arbitrary bit-widths.
-    """
-    if not isinstance(byte_arr, bytes):
-        byte_arr = byte_arr.tobytes()
-
-    if bits not in [4, 8, 16, 32]:
-        raise ValueError(f"Unpacking for {bits}-bit words is not supported.")
-
-    if bits == 8: return np.frombuffer(byte_arr, dtype=np.int8)
-    if bits == 16: return np.frombuffer(byte_arr, dtype=np.int16)
-    if bits == 32: return np.frombuffer(byte_arr, dtype=np.int32)
-    
-    # Custom logic for 4-bit unpacking
-    if bits == 4:
-        # Each byte contains two 4-bit words (nibbles)
-        first_nibbles = (np.frombuffer(byte_arr, dtype=np.uint8) & 0x0F).astype(np.int8)
-        second_nibbles = (np.frombuffer(byte_arr, dtype=np.uint8) >> 4).astype(np.int8)
-        
-        # Handle two's complement for negative numbers (sign bit is the 4th bit)
-        first_nibbles[first_nibbles > 7] -= 16
-        second_nibbles[second_nibbles > 7] -= 16
-
-        # Interleave them back into the correct order
-        unpacked_words = np.empty(len(byte_arr) * 2, dtype=np.int8)
-        unpacked_words[0::2] = first_nibbles
-        unpacked_words[1::2] = second_nibbles
-        return unpacked_words
-
-# --- End Utility Functions ---
 
 
 class DeepSoCFlowPYNQ:
@@ -88,10 +33,6 @@ class DeepSoCFlowPYNQ:
         
         self.defines = config['defines']
         self.bundles = config['bundles']
-
-        # Add the bundle index 'ib' to each bundle for easier debugging.
-        # for i, b in enumerate(self.bundles):
-        #     b['ib'] = i
 
         self.mem = {}
         
@@ -324,9 +265,7 @@ class DeepSoCFlowPYNQ:
                                 # --- Wait for Accelerator ---
                                 while not self.mmio.read((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4):
                                     pass # Busy-wait like the C-runtime
-                                # However, we can use o_bpt to understand how many valid elements we have
-                                time.sleep(0.001) 
-                                valid_elements = o_bpt // 4  # Convert bytes to int32 elements
+
                                 # Invalidate the entire base buffer to ensure cache coherency
                                 self.mem['ocm'][ocm_bank].sync_from_device()
                                 self.mmio.write((self.REG_OFFSETS['A_DONE_WRITE'] + ocm_bank) * 4, 0)
@@ -521,10 +460,6 @@ class DeepSoCFlowPYNQ:
 
         end_time = time.time()
         print(f"\n--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
-        
-        # Reset accelerator start signal now that inference is complete
-        # self.mmio.write(self.REG_OFFSETS['A_START'] * 4, 0)
-        
         # Return the correct final output buffer
         if self.bundles[-1].get('is_softmax', False):
             return self.mem['y']
@@ -630,7 +565,6 @@ class DeepSoCFlowPYNQ:
         x_bits = 1 << self.defines['X_BITS_L2']
         
         # Leaky ReLU logic (matches C: x < 0 ? (nzero ? x: 0) : x << pl_scale)
-        original_x = x
         leaky_x = 0
         if x < 0:
             leaky_x = x if nzero else 0  # leaky if nzero != 0, else standard ReLU
@@ -696,6 +630,9 @@ class DeepSoCFlowPYNQ:
 
     def __del__(self):
         print("\nReleasing memory buffers.")
-        for name, buf in self.mem.items():
-            if hasattr(buf, 'freebuffer'):
-                buf.freebuffer()
+        if hasattr(self, 'mem_base') and self.mem_base is not None:
+            self.mem_base.freebuffer()
+        
+        params_buf = self.mem.get('params')
+        if params_buf is not None and hasattr(params_buf, 'freebuffer'):
+            params_buf.freebuffer()
