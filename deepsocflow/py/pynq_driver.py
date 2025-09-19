@@ -338,100 +338,20 @@ class DeepSoCFlowPYNQ:
                                             
                                             # --- SOFTMAX ---
                                             if b.get('is_softmax', False):
-                                                assert ib == len(self.bundles) - 1, "Softmax is only allowed for the last bundle."
-
-                                                # De-quantize and apply exp, matching the C-runtime
-                                                val = float(out_val)
-                                                val /= (1 << b['softmax_frac'])
-                                                val -= b['softmax_max_f']
-                                                val = np.exp(val)
-                                                
-                                                # Store intermediate exp() value in the final float output buffer
-                                                iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
-                                                self.mem['y'][iy_nhwc] = val
-
-                                                # When the last channel for a pixel is processed, normalize
-                                                if i_yc == b['co'] - 1:
-                                                    sum_exp = 0.0
-                                                    # Sum exponentiated values across all channels for the current pixel
-                                                    for i in range(b['co']):
-                                                        iy_nhwc_sum = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
-                                                        sum_exp += self.mem['y'][iy_nhwc_sum]
-                                                    
-                                                    # Normalize by dividing by the sum
-                                                    if sum_exp != 0:
-                                                        for i in range(b['co']):
-                                                            iy_nhwc_norm = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
-                                                            self.mem['y'][iy_nhwc_norm] /= sum_exp
-                                                
-                                                # Skip the rest of the processing for this value, similar to 'goto' in C
+                                                self._handle_softmax(b, ib, out_val, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
                                                 continue
                                             
                                             # --- MAX/AVG POOL ---
                                             if b['pool'] != 'POOL_NONE':
-                                                # Store the processed value in the NHWC buffer for pooling
-                                                iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
-                                                nhwc_buf[iy_nhwc] = out_val
-
-                                                # Determine the output pooling grid coordinates (ixh_beg, ixw_beg)
-                                                # that this input pixel (i_yh, i_yw) might complete.
-                                                ixh_beg, rem_ixh = divmod(i_yh + b['psh_shift'] - b['pkh'] + 1, b['psh'])
-                                                ixw_beg, rem_ixw = divmod(i_yw + b['psw_shift'] - b['pkw'] + 1, b['psw'])
-
-                                                if ixh_beg < 0 or ixw_beg < 0:
-                                                    continue # Skip if target coordinates are out of bounds
-
-                                                # This logic determines if a pooling window calculation can be triggered.
-                                                # It only proceeds if the current pixel is at the bottom-right of a stride window,
-                                                # or if it's the very last pixel in a row/column, which triggers a sweep-up.
-                                                if rem_ixh != 0:
-                                                    if i_yh == yh - 1: ixh_beg += 1
-                                                    else: continue
-                                                if rem_ixw != 0:
-                                                    if i_yw == yw - 1: ixw_beg += 1
-                                                    else: continue
-
-                                                # Define the pooling window boundaries
-                                                ph_end = i_yh
-                                                pw_end = i_yw
-                                                ph_beg_const = max(b['psh'] * ixh_beg - b['psh_shift'], 0) - 1
-                                                pw_beg_const = max(b['psw'] * ixw_beg - b['psw_shift'], 0) - 1
-
-                                                # Determine how many output pixels to compute. Usually 1, but can be more at image edges.
-                                                xh_sweep = b['oh'] if i_yh == yh - 1 else ixh_beg + 1
-                                                xw_sweep = b['ow'] if i_yw == yw - 1 else ixw_beg + 1
+                                                pool_result = self._handle_pooling(
+                                                    b, out_val, p_out_buffer, nhwc_buf, 
+                                                    i_yn, i_yh, i_yw, i_yc, 
+                                                    yn, yh, yw, yc
+                                                )
+                                                if pool_result is None:
+                                                    continue
                                                 
-                                                # Sweep the pooling window across the output grid
-                                                _ph_beg = ph_beg_const
-                                                for ixh in range(ixh_beg, xh_sweep):
-                                                    _pw_beg = pw_beg_const
-                                                    for ixw in range(ixw_beg, xw_sweep):
-                                                        # Traverse the window to find max or sum
-                                                        result = -2147483648 if b['pool'] == 'POOL_MAX' else 0
-                                                        count = 0
-                                                        for ipyh in range(_ph_beg + 1, ph_end + 1):
-                                                            for ipyw in range(_pw_beg + 1, pw_end + 1):
-                                                                read_idx = self._flatten_nhwc(i_yn, ipyh, ipyw, i_yc, yn, yh, yw, yc)
-                                                                read_val = nhwc_buf[read_idx]
-                                                                result = max(result, read_val) if b['pool'] == 'POOL_MAX' else (result + read_val)
-                                                                count += 1
-                                                        
-                                                        # Finalize AVG pool and apply activation
-                                                        if b['pool'] == 'POOL_AVG':
-                                                            result = self.div_round(result, count) if count > 0 else 0
-                                                            result = self._quant_lrelu(result, b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'])
-                                                        
-                                                        # --- TILE WRITE ---
-                                                        # This logic takes the pooled 'result' and writes it to the
-                                                        # correct tiled position in the output buffer, matching the C runtime.
-                                                        self._tile_write(result, p_out_buffer, b, i_yn, ixh, ixw, i_yc, yn, b['ph'], b['pw'], yc)
-                                                        
-                                                        _pw_beg += b['psw']
-                                                    _ph_beg += b['psh']
-                                                
-                                                # Update yh and yw to post-pooling dimensions to match C runtime
-                                                yh = b['ph']
-                                                yw = b['pw']
+                                                yh, yw = pool_result
                                                 continue # Skip final NHWC store, as output is written directly
                                             
                                             # --- NO POOLING: TILE WRITE OR FINAL STORE ---
@@ -460,6 +380,7 @@ class DeepSoCFlowPYNQ:
 
         end_time = time.time()
         print(f"\n--- Model Inference Finished in {end_time - start_time:.4f} seconds ---")
+        
         # Return the correct final output buffer
         if self.bundles[-1].get('is_softmax', False):
             return self.mem['y']
@@ -551,6 +472,99 @@ class DeepSoCFlowPYNQ:
             # Apply new value
             new_byte = (existing_byte & clear_mask) | ((int(val) & mask) << bit_offset)
             p_out_buffer[byte_idx] = new_byte
+
+    def _handle_softmax(self, b, ib, out_val, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc):
+        """
+        Handles the softmax operation. This is extracted from model_run for clarity.
+        """
+        assert ib == len(self.bundles) - 1, "Softmax is only allowed for the last bundle."
+
+        # De-quantize and apply exp, matching the C-runtime
+        val = float(out_val)
+        val /= (1 << b['softmax_frac'])
+        val -= b['softmax_max_f']
+        val = np.exp(val)
+        
+        # Store intermediate exp() value in the final float output buffer
+        iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+        self.mem['y'][iy_nhwc] = val
+
+        # When the last channel for a pixel is processed, normalize
+        if i_yc == b['co'] - 1:
+            sum_exp = 0.0
+            # Sum exponentiated values across all channels for the current pixel
+            for i in range(b['co']):
+                iy_nhwc_sum = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
+                sum_exp += self.mem['y'][iy_nhwc_sum]
+            
+            # Normalize by dividing by the sum
+            if sum_exp != 0:
+                for i in range(b['co']):
+                    iy_nhwc_norm = self._flatten_nhwc(i_yn, i_yh, i_yw, i, yn, yh, yw, yc)
+                    self.mem['y'][iy_nhwc_norm] /= sum_exp
+    
+    def _handle_pooling(self, b, out_val, p_out_buffer, nhwc_buf, i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc):
+        """
+        Handles the MAX/AVG pooling operation. Extracted from model_run for clarity.
+        Returns the updated (yh, yw) dimensions after pooling or None to skip.
+        """
+        # Store the processed value in the NHWC buffer for pooling
+        iy_nhwc = self._flatten_nhwc(i_yn, i_yh, i_yw, i_yc, yn, yh, yw, yc)
+        nhwc_buf[iy_nhwc] = out_val
+
+        # Determine the output pooling grid coordinates (ixh_beg, ixw_beg)
+        ixh_beg, rem_ixh = divmod(i_yh + b['psh_shift'] - b['pkh'] + 1, b['psh'])
+        ixw_beg, rem_ixw = divmod(i_yw + b['psw_shift'] - b['pkw'] + 1, b['psw'])
+
+        if ixh_beg < 0 or ixw_beg < 0:
+            return None # Skip if target coordinates are out of bounds
+
+        # This logic determines if a pooling window calculation can be triggered.
+        if rem_ixh != 0:
+            if i_yh == yh - 1: ixh_beg += 1
+            else: return None
+        if rem_ixw != 0:
+            if i_yw == yw - 1: ixw_beg += 1
+            else: return None
+
+        # Define the pooling window boundaries
+        ph_end = i_yh
+        pw_end = i_yw
+        ph_beg_const = max(b['psh'] * ixh_beg - b['psh_shift'], 0) - 1
+        pw_beg_const = max(b['psw'] * ixw_beg - b['psw_shift'], 0) - 1
+
+        # Determine how many output pixels to compute
+        xh_sweep = b['oh'] if i_yh == yh - 1 else ixh_beg + 1
+        xw_sweep = b['ow'] if i_yw == yw - 1 else ixw_beg + 1
+        
+        # Sweep the pooling window across the output grid
+        _ph_beg = ph_beg_const
+        for ixh in range(ixh_beg, xh_sweep):
+            _pw_beg = pw_beg_const
+            for ixw in range(ixw_beg, xw_sweep):
+                # Traverse the window to find max or sum
+                result = -2147483648 if b['pool'] == 'POOL_MAX' else 0
+                count = 0
+                for ipyh in range(_ph_beg + 1, ph_end + 1):
+                    for ipyw in range(_pw_beg + 1, pw_end + 1):
+                        read_idx = self._flatten_nhwc(i_yn, ipyh, ipyw, i_yc, yn, yh, yw, yc)
+                        read_val = nhwc_buf[read_idx]
+                        result = max(result, read_val) if b['pool'] == 'POOL_MAX' else (result + read_val)
+                        count += 1
+                
+                # Finalize AVG pool and apply activation
+                if b['pool'] == 'POOL_AVG':
+                    result = self.div_round(result, count) if count > 0 else 0
+                    result = self._quant_lrelu(result, b['pa_nzero'], b['pa_shift'], b['pa_pl_scale'])
+                
+                # --- TILE WRITE ---
+                self._tile_write(result, p_out_buffer, b, i_yn, ixh, ixw, i_yc, yn, b['ph'], b['pw'], yc)
+                
+                _pw_beg += b['psw']
+            _ph_beg += b['psh']
+        
+        # Return updated yh and yw to post-pooling dimensions
+        return b['ph'], b['pw']
 
     def _flatten_nhwc(self, in_val, ih, iw, ic, N, H, W, C):
         """
