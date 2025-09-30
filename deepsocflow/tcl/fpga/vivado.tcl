@@ -8,30 +8,39 @@ create_bd_cell -type module -reference axi_cgra4ml axi_cgra4ml_0
 if {$BOARD eq "pynq_z2"} {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {32}] [get_bd_cells axi_cgra4ml_0]
 
-    # Create and configure the AXI SmartConnect for the HP0 port
-    create_bd_cell -type ip -vlnv xilinx.com:ip:smartconnect:1.0 smartconnect_hp0
-    set_property -dict [list CONFIG.NUM_SI {3} CONFIG.NUM_MI {1}] [get_bd_cells smartconnect_hp0]
-
-    # Connect the AXI masters from the CGRA core to the slave interfaces of the SmartConnect
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_output] [get_bd_intf_pins smartconnect_hp0/S00_AXI]
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_pixel]  [get_bd_intf_pins smartconnect_hp0/S01_AXI]
-    connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_weights] [get_bd_intf_pins smartconnect_hp0/S02_AXI]
-
-    # Connect the master interface of the SmartConnect to the PS High-Performance slave port
-    connect_bd_intf_net [get_bd_intf_pins smartconnect_hp0/M00_AXI] $PS_S_AXI
-
-    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} Master $PS_M_AXI_LITE Slave {/axi_cgra4ml_0/s_axil} ddr_seg {Auto} intc_ip {New AXI Interconnect} master_apm {0}]  [get_bd_intf_pins axi_cgra4ml_0/s_axil]
+    # Manually add a Processor System Reset core to handle reset polarity,
+    # making the design compatible with the default PYNQ driver.
+    create_bd_cell -type ip -vlnv xilinx.com:ip:proc_sys_reset:5.0 rst_ps7_0_75M
     
-    # Connect the clock for the SmartConnect. The reset is inferred automatically.
-    connect_bd_net [get_bd_pins smartconnect_hp0/aclk] [get_bd_pins processing_system7_0/FCLK_CLK0]
+    # Connect the clock and the external (active-low) reset from the PS to the reset controller.
+    connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins rst_ps7_0_75M/slowest_sync_clk]
+    connect_bd_net [get_bd_pins processing_system7_0/FCLK_RESET0_N] [get_bd_pins rst_ps7_0_75M/ext_reset_in]
 
-    apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config [list Clk $PS_CLK] [get_bd_pins processing_system7_0/S_AXI_HP0_ACLK]
+    # Connect the accelerator's reset pin to the peripheral reset output of the new reset controller.
+    connect_bd_net [get_bd_pins rst_ps7_0_75M/peripheral_aresetn] [get_bd_pins axi_cgra4ml_0/rstn]
+
+    # Connect the AXI masters from the CGRA core to the PS High-Performance slave ports.
+    # The automation will create AXI Interconnects, which also need a reset.
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_output} Slave {/processing_system7_0/S_AXI_HP0} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_pixel} Slave {/processing_system7_0/S_AXI_HP1} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP1]
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_weights} Slave {/processing_system7_0/S_AXI_HP2} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP2]
+
+    # Connect the AXI-Lite slave interface for control registers.
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list Master $PS_M_AXI_LITE Slave /axi_cgra4ml_0/s_axil intc_ip {New AXI Interconnect}] [get_bd_intf_pins axi_cgra4ml_0/s_axil]
+    
+    # Now, connect the interconnect reset pins to the interconnect reset output of the reset controller.
+    # This is the key step that provides the standardized reset.
+    connect_bd_net [get_bd_pins rst_ps7_0_75M/interconnect_aresetn] [get_bd_pins ps7_0_axi_periph/ARESETN]
+    connect_bd_net [get_bd_pins rst_ps7_0_75M/interconnect_aresetn] [get_bd_pins axi_cgra4ml_0_m_axi_output_interconnect/M00_ARESETN]
+    connect_bd_net [get_bd_pins rst_ps7_0_75M/interconnect_aresetn] [get_bd_pins axi_cgra4ml_0_m_axi_pixel_interconnect/M00_ARESETN]
+    connect_bd_net [get_bd_pins rst_ps7_0_75M/interconnect_aresetn] [get_bd_pins axi_cgra4ml_0_m_axi_weights_interconnect/M00_ARESETN]
+
 } else {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {40}] [get_bd_cells axi_cgra4ml_0]
     connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_output] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HPC0_FPD]
     connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_pixel] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HPC1_FPD]
     connect_bd_intf_net [get_bd_intf_pins axi_cgra4ml_0/m_axi_weights] [get_bd_intf_pins zynq_ultra_ps_e_0/S_AXI_HP0_FPD]
-    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} Master {/zynq_ultra_ps_e_0/M_AXI_HPM1_FPD} Slave {/axi_cgra4ml_0/s_axil} ddr_seg {Auto} intc_ip {New AXI Interconnect} master_apm {0}}  [get_bd_intf_pins axi_cgra4ml_0/s_axil]
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Clk_master {Auto} Clk_slave {Auto} Clk_xbar {Auto} Master {/zynq_ultra~~_ps_e_0/M_AXI_HPM1_FPD} Slave {/axi_cgra4ml_0/s_axil} ddr_seg {Auto} intc_ip {New AXI Interconnect} master_apm {0}}  [get_bd_intf_pins axi_cgra4ml_0/s_axil]
     apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config { Clk {/zynq_ultra_ps_e_0/pl_clk0 (250 MHz)} Freq {100} Ref_Clk0 {} Ref_Clk1 {} Ref_Clk2 {}}  [get_bd_pins zynq_ultra_ps_e_0/saxihp0_fpd_aclk]
     apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config { Clk {/zynq_ultra_ps_e_0/pl_clk0 (250 MHz)} Freq {100} Ref_Clk0 {} Ref_Clk1 {} Ref_Clk2 {}}  [get_bd_pins zynq_ultra_ps_e_0/saxihpc0_fpd_aclk]
     apply_bd_automation -rule xilinx.com:bd_rule:clkrst -config { Clk {/zynq_ultra_ps_e_0/pl_clk0 (250 MHz)} Freq {100} Ref_Clk0 {} Ref_Clk1 {} Ref_Clk2 {}}  [get_bd_pins zynq_ultra_ps_e_0/saxihpc1_fpd_aclk]
@@ -79,11 +88,6 @@ report_drc -name drc_1 -file $PROJECT_NAME/reports/${PROJECT_NAME}_${BOARD}_${FR
 exec mkdir -p $PROJECT_NAME/output
 
 # Handle version-dependent output file paths.
-if {$BOARD eq "pynq_z2"} {
-    # Vivado 2020.1 places the HWH file in the .srcs directory
-    exec cp "$PROJECT_NAME/$PROJECT_NAME.srcs/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
-} else {
-    # Newer Vivado versions place the HWH file in the .gen directory
-    exec cp "$PROJECT_NAME/$PROJECT_NAME.gen/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
-}
+# Newer Vivado versions place the HWH file in the .gen directory
+exec cp "$PROJECT_NAME/$PROJECT_NAME.gen/sources_1/bd/design_1/hw_handoff/design_1.hwh" $PROJECT_NAME/output/
 exec cp "$PROJECT_NAME/$PROJECT_NAME.runs/impl_1/design_1_wrapper.bit" $PROJECT_NAME/output/design_1.bit
