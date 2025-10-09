@@ -7,23 +7,10 @@ create_bd_cell -type module -reference axi_cgra4ml axi_cgra4ml_0
 
 if {$BOARD eq "pynq_z2"} {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {32}] [get_bd_cells axi_cgra4ml_0]
-
-    # Remove the manual SmartConnect instantiation.
-    # The apply_bd_automation commands below will create the necessary interconnects automatically.
-
-    # Connect the AXI masters from the CGRA core to the PS High-Performance slave ports using automation.
-    # This will correctly instantiate AXI Interconnects or SmartConnects to handle the AXI4-to-AXI3 conversion.
     apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_output} Slave {/processing_system7_0/S_AXI_HP0} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP0]
     apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_pixel} Slave {/processing_system7_0/S_AXI_HP1} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP1]
-    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_weights} Slave {/processing_system7_0/S_AXI_HP2} intc_ip {New AXI Interconnect} } [get_bd_intf_pins processing_system7_0/S_AXI_HP2]
-
-    # Connect the AXI-Lite slave interface for control registers.
-    # Use the 'list' command to correctly substitute the $PS_M_AXI_LITE variable.
+    apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config { Master {/axi_cgra4ml_0/m_axi_weights} Slave {/processing_system7_0/S_AXI_HP2} intc_ip {New AXI Interconnect} } [get_bd_intf_p
     apply_bd_automation -rule xilinx.com:bd_rule:axi4 -config [list Master $PS_M_AXI_LITE Slave /axi_cgra4ml_0/s_axil intc_ip {New AXI Interconnect}] [get_bd_intf_pins axi_cgra4ml_0/s_axil]
-    
-    # The clock is now connected automatically by the apply_bd_automation rules above.
-    # The explicit connection below is no longer needed.
-    # connect_bd_net [get_bd_pins processing_system7_0/FCLK_CLK0] [get_bd_pins axi_cgra4ml_0/clk]
     
 } else {
     set_property -dict [list CONFIG.AXIL_ADDR_WIDTH {40}] [get_bd_cells axi_cgra4ml_0]
@@ -46,9 +33,10 @@ update_compile_order -fileset sources_1
 if {$BOARD eq "pynq_z2"} {
     set_property range 4K [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
     set_property offset ${CONFIG_BASEADDR} [get_bd_addr_segs {processing_system7_0/Data/SEG_axi_cgra4ml_0_reg0}]
-    
-    # Explicitly assign the Zynq's main memory space to the AXI masters from the accelerator
-    assign_bd_address [get_bd_addr_segs /processing_system7_0/S_AXI_HP0/HP0_DDR_LOWOCM]
+    set_property range 256M [get_bd_addr_segs {axi_cgra4ml_0/m_axi_output/SEG_processing_system7_0_HP0_DDR_LOWOCM}]
+    set_property range 256M [get_bd_addr_segs {axi_cgra4ml_0/m_axi_pixel/SEG_processing_system7_0_HP1_DDR_LOWOCM}]
+    set_property range 256M [get_bd_addr_segs {axi_cgra4ml_0/m_axi_weights/SEG_processing_system7_0_HP2_DDR_LOWOCM}]
+    assign_bd_address 
 } else {
     set_property range 256M [get_bd_addr_segs {zynq_ultra_ps_e_0/Data/SEG_axi_cgra4ml_0_reg0}]
     set_property offset ${CONFIG_BASEADDR} [get_bd_addr_segs {zynq_ultra_ps_e_0/Data/SEG_axi_cgra4ml_0_reg0}]
