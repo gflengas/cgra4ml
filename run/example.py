@@ -124,15 +124,16 @@ model = Model(inputs=[x_in], outputs=[x])
 Train Model
 '''
 
-model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.0001), metrics=["accuracy"])
-history = model.fit(
-        x_train, 
-        y_train, 
-        batch_size=BATCH_SIZE,
-        epochs=NB_EPOCH, 
-        initial_epoch=1, 
-        verbose=True,
-        validation_split=VALIDATION_SPLIT)
+# QAT (quantization-aware training) disabled - load pretrained/PTQ weights instead
+# model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.0001), metrics=["accuracy"])
+# history = model.fit(
+#         x_train,
+#         y_train,
+#         batch_size=BATCH_SIZE,
+#         epochs=NB_EPOCH,
+#         initial_epoch=1,
+#         verbose=True,
+#         validation_split=VALIDATION_SPLIT)
 
 
 
@@ -143,8 +144,9 @@ Save & Reload
 save_model(model, "mnist.h5")
 loaded_model = load_qmodel("mnist.h5")
 
-score = loaded_model.evaluate(x_test, y_test, verbose=0)
-print(f"Test loss:{score[0]}, Test accuracy:{score[1]}")
+# requires model.compile() (disabled above with QAT)
+# score = loaded_model.evaluate(x_test, y_test, verbose=0)
+# print(f"Test loss:{score[0]}, Test accuracy:{score[1]}")
 
 
 

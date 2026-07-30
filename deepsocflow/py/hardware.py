@@ -62,23 +62,23 @@ class Hardware:
         assert bits_input in [1,2,4,8] and bits_weights in [1,2,4,8]
         assert bits_bias  in [8,16,32]
         
-        self.ROWS, self.COLS = processing_elements
+        self.ROWS, self.COLS = processing_elements  # PE (processing element) array: rows, cols
         self.FREQ   = frequency_mhz
-        self.X_BITS = bits_input
-        self.K_BITS = bits_weights
-        self.Y_BITS = bits_sum
-        self.B_BITS = bits_bias
-        self.XN_MAX = max_batch_size
-        self.CI_MAX = max_channels_in
-        self.KH_MAX, self.KW_MAX = tuple(max_kernel_size) if (type(max_kernel_size) in [tuple, list]) else (max_kernel_size, max_kernel_size)
-        self.XH_MAX, self.XW_MAX = tuple(max_image_size ) if (type(max_image_size ) in [tuple, list]) else (max_image_size , max_image_size )
+        self.X_BITS = bits_input     # activation (x) bitwidth
+        self.K_BITS = bits_weights   # kernel/weight (k) bitwidth
+        self.Y_BITS = bits_sum       # accumulator/conv-sum (y) bitwidth
+        self.B_BITS = bits_bias      # bias (b) bitwidth
+        self.XN_MAX = max_batch_size    # max input batch size (N)
+        self.CI_MAX = max_channels_in    # max input channels (CI)
+        self.KH_MAX, self.KW_MAX = tuple(max_kernel_size) if (type(max_kernel_size) in [tuple, list]) else (max_kernel_size, max_kernel_size)  # max kernel height/width
+        self.XH_MAX, self.XW_MAX = tuple(max_image_size ) if (type(max_image_size ) in [tuple, list]) else (max_image_size , max_image_size )  # max input image height/width
         self.MAX_N_BUNDLES = max_n_bundles
         self.AXI_WIDTH = axi_width
         self.HEADER_WIDTH = header_width
         self.CONFIG_BASEADDR = config_baseaddr
         self.AXI_MAX_BURST_LEN = axi_max_burst_len
-        self.INT_BITS = target_cpu_int_bits
-        self.ASYNC_RESETN = async_resetn
+        self.INT_BITS = target_cpu_int_bits  # bitwidth of native int on target CPU (used to bound intermediate accumulations)
+        self.ASYNC_RESETN = async_resetn     # active-low asynchronous reset enable
         self.VALID_PROB = int(valid_prob * 1000)
         self.READY_PROB = int(ready_prob * 1000)
 
@@ -92,24 +92,24 @@ class Hardware:
         '''
         | Depth of RAM needed for edge padding.
         |     if k == 1 -> 0
-        |     else ci*xw*(blocks-1) 
+        |     else ci*xw*(blocks-1)
         '''
 
-        self.L_MAX                 = int(np.ceil(self.XH_MAX//self.ROWS))
+        self.L_MAX                 = int(np.ceil(self.XH_MAX//self.ROWS))  # max number of row-blocks (L) an image is split into
         self.CONFIG_BEATS          = 0
-        self.X_PAD_MAX             = int(np.ceil(self.KH_MAX//2))
-        self.BITS_KW2              = clog2((self.KW_MAX+1)/2)
-        self.BITS_KH2              = clog2((self.KH_MAX+1)/2)
-        self.BITS_CIN_MAX          = clog2(self.CI_MAX)
-        self.BITS_COLS_MAX         = clog2(self.XW_MAX)
-        self.BITS_BLOCKS_MAX       = clog2(self.L_MAX)
-        self.BITS_XN_MAX           = clog2(self.XN_MAX)
-        self.BITS_RAM_WEIGHTS_ADDR = clog2(self.RAM_WEIGHTS_DEPTH)
-        self.Y_OUT_BITS            = 2**clog2(self.Y_BITS)
-        self.W_BPT                 = 32#clog2(self.ROWS*self.COLS*self.Y_OUT_BITS/8)
+        self.X_PAD_MAX             = int(np.ceil(self.KH_MAX//2))  # max rows of padding needed between row-blocks for convolution edges
+        self.BITS_KW2              = clog2((self.KW_MAX+1)/2)   # bits to encode KW//2 (half kernel width)
+        self.BITS_KH2              = clog2((self.KH_MAX+1)/2)   # bits to encode KH//2 (half kernel height)
+        self.BITS_CIN_MAX          = clog2(self.CI_MAX)         # bits to encode max input channels
+        self.BITS_COLS_MAX         = clog2(self.XW_MAX)         # bits to encode max image width
+        self.BITS_BLOCKS_MAX       = clog2(self.L_MAX)          # bits to encode max number of row-blocks
+        self.BITS_XN_MAX           = clog2(self.XN_MAX)         # bits to encode max batch size
+        self.BITS_RAM_WEIGHTS_ADDR = clog2(self.RAM_WEIGHTS_DEPTH)  # address width of the weights RAM
+        self.Y_OUT_BITS            = 2**clog2(self.Y_BITS)      # conv-sum bitwidth rounded up to a power of two
+        self.W_BPT                 = 32#clog2(self.ROWS*self.COLS*self.Y_OUT_BITS/8)  # weights bytes-per-transfer
 
         self.MODULE_DIR = os.path.normpath(os.path.dirname(deepsocflow.__file__)).replace('\\', '/')
-        self.TB_MODULE = tb_module
+        self.TB_MODULE = tb_module  # testbench top module name
         self.SOURCES = \
             glob.glob(f'{self.MODULE_DIR}/test/sv/*.sv') + \
             glob.glob(f'{self.MODULE_DIR}/test/sv/**/*.v') + \

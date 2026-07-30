@@ -13,15 +13,15 @@ from deepsocflow.py.hardware import *
 
 class XActivation(QActivation):
     def __init__(self, sys_bits, o_int_bits, type='relu', slope=1, *args, **kwargs):
-        self.sys_bits = sys_bits
-        self.o_int_bits = o_int_bits
+        self.sys_bits = sys_bits        # SYS_BITS(x,k,b): system-wide activation/kernel/bias bitwidths
+        self.o_int_bits = o_int_bits     # output integer bits (fixed-point)
         self.type = type
 
-        self.slope = 1 if type == None else slope
-        self.non_zero = 1*(self.slope != 0)
+        self.slope = 1 if type == None else slope    # leaky_relu negative_slope
+        self.non_zero = 1*(self.slope != 0)           # 1 unless slope==0 (i.e. plain relu)
         self.log_slope = np.log2(self.slope) if self.non_zero else 0
         assert int(self.log_slope) == self.log_slope and self.log_slope <= 0, f"Error: negative_slope:{self.slope} of leaky_relu has to be a negative power of two. eg.0.125"
-        self.plog_slope = -int(self.log_slope)
+        self.plog_slope = -int(self.log_slope)  # positive log_slope: right-shift amount for negative inputs
         self.shift_bits = None
 
         match type:
@@ -43,7 +43,7 @@ class XActivation(QActivation):
         self.out.ftensor = super().call(input_tensor)
         return self.out.ftensor
     
-    def call_int(self, x_tensor, hw):       
+    def call_int(self, x_tensor, hw):  # x_tensor: XTensor input, hw: Hardware config
 
         x = x_tensor.itensor.numpy().astype(int)
         self.shift_bits = self.plog_slope + x_tensor.frac - self.out.frac
@@ -60,19 +60,19 @@ class XActivation(QActivation):
 
 
 class XConvBN(QConv2DBatchnorm):
-    def __init__(self, k_int_bits, b_int_bits, act, *args, **kwargs):
+    def __init__(self, k_int_bits, b_int_bits, act, *args, **kwargs):  # k_int_bits/b_int_bits: kernel/bias integer bits
 
         self.type = 'conv'
         if act is None:
             raise ValueError("Activation function must be provided. Set type to none if no activation is needed")
-        
+
         self.act = act
         self.sys_bits = act.sys_bits
-        self.k_frac = get_frac_bits(self.sys_bits.k, k_int_bits)
-        self.b_frac = get_frac_bits(self.sys_bits.b, b_int_bits)
+        self.k_frac = get_frac_bits(self.sys_bits.k, k_int_bits)  # kernel fractional bits
+        self.b_frac = get_frac_bits(self.sys_bits.b, b_int_bits)  # bias fractional bits
         self.out = XTensor(None, None, float_only=True)
-        self.bias_val_shift = 0
-        self.bias_b_shift = 0
+        self.bias_val_shift = 0  # shift applied to conv-sum's value when adding bias (see XTensor.add_val_shift)
+        self.bias_b_shift = 0    # shift applied to bias's value when adding to conv-sum
         
         if "kernel_quantizer" in kwargs or "bias_quantizer" in kwargs:
             raise ValueError("kernel_quantizer and bias_quantizer will be derived from act.sys_bits and k_frac")
@@ -105,7 +105,7 @@ class XConvBN(QConv2DBatchnorm):
         Conv 2D
         '''
         
-        clog2_add = int(np.ceil(np.log2(np.prod(self.w.itensor.shape[:-1]))))
+        clog2_add = int(np.ceil(np.log2(np.prod(self.w.itensor.shape[:-1]))))  # extra bits needed for the conv accumulation (sum over KH*KW*CI terms)
         out = XTensor(
             tensor=tf.keras.backend.conv2d(self.x.itensor, self.w.itensor, padding='same'),
             bits=self.x.bits + self.w.bits + clog2_add,
@@ -121,30 +121,30 @@ class XConvBN(QConv2DBatchnorm):
         out, (self.bias_val_shift, self.bias_b_shift) = out.add_val_shift(self.b)
         assert out.bits <= hw.INT_BITS, \
             f"After bias addition, resulting bits {out.bits} are more than bits for integer in CPU {hw.INT_BITS}. Reduce bits or increase integer bits of bias to continue"
-        
+
         '''
         Striding
         '''
         if self.strides != (1,1):
-            KH, KW = self.kernel_size
-            CSH, CSW = self.strides
+            KH, KW = self.kernel_size   # kernel height/width
+            CSH, CSW = self.strides     # conv stride height/width
 
             pre_stride = out.itensor.numpy()
 
-            XN, XH, XW, YC = pre_stride.shape
-            CYH, CYW = math.ceil(XH/CSH), math.ceil(XW/CSW)
+            XN, XH, XW, YC = pre_stride.shape  # batch, height, width, out-channels (pre-stride)
+            CYH, CYW = math.ceil(XH/CSH), math.ceil(XW/CSW)  # conv output height/width after striding
             
             post_stride = np.zeros((XN, CYH, CYW, YC)).astype(pre_stride.dtype)
             
-            (h_shift, w_shift) = (0,0)
+            (h_shift, w_shift) = (0,0)  # stride start-offset (height/width) for 'same' padding
             if self.padding=="same":
                 h_shift = (KH-1)//2 - max((CSH*(CYH-1)+KH-XH)//2, 0)
                 w_shift = (KW-1)//2 - max((CSW*(CYW-1)+KW-XW)//2, 0)
 
-            for xh in range(XH):
+            for xh in range(XH):        # xh/xw: pre-stride height/width index
                 for xw in range(XW):
                     if (xh-h_shift)%CSH == 0 and (xw-w_shift)%CSW == 0:
-                        cyh = (xh-h_shift)//CSH
+                        cyh = (xh-h_shift)//CSH  # cyh/cyw: post-stride (conv output) height/width index
                         cyw = (xw-w_shift)//CSW
                         post_stride[:,cyh,cyw,:] = pre_stride[:,xh,xw,:]
 
@@ -156,16 +156,16 @@ class XConvBN(QConv2DBatchnorm):
 
 
 class XDense(QDense):
-    def __init__(self, k_int_bits, b_int_bits, act, *args, **kwargs):
+    def __init__(self, k_int_bits, b_int_bits, act, *args, **kwargs):  # k_int_bits/b_int_bits: kernel/bias integer bits
 
         self.type = 'dense'
         if act is None:
             raise ValueError("Activation function must be provided. Set type to none if no activation is needed")
-        
+
         self.act = act
         self.sys_bits = act.sys_bits
-        self.k_frac = get_frac_bits(self.sys_bits.k, k_int_bits)
-        self.b_frac = get_frac_bits(self.sys_bits.b, b_int_bits)
+        self.k_frac = get_frac_bits(self.sys_bits.k, k_int_bits)  # kernel fractional bits
+        self.b_frac = get_frac_bits(self.sys_bits.b, b_int_bits)  # bias fractional bits
         self.out = XTensor(None, None, float_only=True)
 
         
@@ -224,9 +224,9 @@ class XAdd(Add):
         self.act = act
         self.sys_bits = sys_bits
         self.out = XTensor(None, None, float_only=True)
-        self.source_ib = None
-        self.add_val_shift = None
-        self.add_a_shift = None
+        self.source_ib = None       # bundle index (ib) of the residual/skip-connection source
+        self.add_val_shift = None   # shift applied to this bundle's value when adding the residual (see XTensor.add_val_shift)
+        self.add_a_shift = None     # shift applied to the residual (a=added tensor) value when adding
 
     def call(self, input_tensor):
         self.out.ftensor = super().call(input_tensor)
@@ -270,12 +270,12 @@ class XPool(Layer):
         self.x = x
 
         in_arr = x.itensor.numpy().astype(int)
-        YN, YH, YW, YC = in_arr.shape
-        PKH, PKW = self.pool_layer.pool_size
-        PSH, PSW = self.pool_layer.strides
+        YN, YH, YW, YC = in_arr.shape           # input batch/height/width/channels (pre-pool)
+        PKH, PKW = self.pool_layer.pool_size    # pool kernel height/width
+        PSH, PSW = self.pool_layer.strides      # pool stride height/width
 
         if self.pool_layer.padding == "same":
-            PXH = (YH+PSH-1)//PSH
+            PXH = (YH+PSH-1)//PSH               # pool output height/width
             PXW = (YW+PSW-1)//PSW
         else:
             PXH = (YH-PKH+PSH)//PSH

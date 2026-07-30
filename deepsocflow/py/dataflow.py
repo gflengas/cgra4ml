@@ -4,7 +4,7 @@ from collections import namedtuple
 from deepsocflow.py.utils import *
 
 def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
-
+    # KH/KW: kernel height/width, CI/CO: input/output channels
     KH, KW, CI, CO = w_shape
     print('weights initial (KH, KW, CI, CO) =', w_shape)
 
@@ -19,11 +19,12 @@ def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
 
     print(f'KH={KH}, KW={KW}, CI={CI}, CO={CO}, CO_PRL={CO_PRL}, EG={EG}, IT={IT}, CO_PAD={CO_PAD}, CM={CM}, CP={CP}')
 
+    # XN/XH/XW: input batch size/height/width
     XN, XH, XW, CI = x_shape
     print('input initial (XN, XH, XW, CI)=', x_shape)
 
     XL  = int(np.ceil(XH/hw.ROWS))    # Blocks
-    YN, YH, YW, YC = XN, XH, XW, CO
+    YN, YH, YW, YC = XN, XH, XW, CO   # YN/YH/YW/YC: running output batch/height/width/channels, updated as we go through conv/pool/flatten
 
     X_PAD = 0 if KH == 1 else hw.X_PAD_MAX
 
@@ -31,15 +32,15 @@ def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
     Conv Striding
     '''
     if core.type == 'conv':
-        CSH, CSW = core.strides
+        CSH, CSW = core.strides  # conv stride height/width
         assert XH > KH//2
         assert XW > KW//2
     else:
         CSH, CSW = 1,1
 
-    CYH, CYW = int(np.ceil(XH/CSH)), int(np.ceil(XW/CSW))
-    
-    CSH_SHIFT, CSW_SHIFT = 0,0
+    CYH, CYW = int(np.ceil(XH/CSH)), int(np.ceil(XW/CSW))  # conv output (Y) height/width after striding
+
+    CSH_SHIFT, CSW_SHIFT = 0,0  # conv stride start-offset (height/width) for 'same' padding
     if core.type == 'conv':
         if core.padding == "same":
             CSH_SHIFT = (KH-1)//2 - max((CSH*(CYH-1)+KH-XH)//2, 0)
@@ -52,9 +53,9 @@ def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
     '''
     Pooling
     '''
-    PKH = PKW = PSH = PSW = 1
-    PSH_SHIFT = PSW_SHIFT = 0
-    PYH, PYW = YH, YW
+    PKH = PKW = PSH = PSW = 1  # pool kernel height/width, pool stride height/width
+    PSH_SHIFT = PSW_SHIFT = 0  # pool stride start-offset (height/width) for 'same' padding
+    PYH, PYW = YH, YW          # pool output (Y) height/width
 
     if pool is not None:
         PKH, PKW = pool.pool_layer.pool_size
@@ -69,12 +70,12 @@ def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
         else:
             PYH = (YH-PKH+PSH)//PSH
             PYW = (YW-PKW+PSW)//PSW
-    
+
     YH, YW = PYH, PYW
     print(f"out after (strides:{(PSH,PSW)}, sizes:{(PKH, PKW)}) POOLING: (XN, PYH, PYW, CO)={(XN, YH, YW, CO)}")
 
     YL  = int(np.ceil(YH/hw.ROWS))    # Blocks
-    ON, OH, OW, OC = YN, YH, YW, YC
+    ON, OH, OW, OC = YN, YH, YW, YC   # ON/OH/OW/OC: final bundle output batch/height/width/channels
 
     if flatten:
         YH, YW, YC = 1, 1, YH*YW*YC
@@ -98,7 +99,7 @@ def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
 
 def create_headers(hw, r):
     '''
-    Create headers
+    Create headers (hw: Hardware config, r: Runtime namedtuple of per-bundle params)
     '''
     def pack_bits(arr, total):
         sum_width = 0
@@ -149,14 +150,15 @@ def check_sparsity(w, x):
 
 
 
-def reorder_b_q2e_conv(b, hw, r):
+# q2e = "quantized (software/NHWC layout) to engine (hardware layout)", e2q = the inverse
+def reorder_b_q2e_conv(b, hw, r):  # b: bias tensor, hw: Hardware config, r: Runtime params
     b = np.pad(b, ((0,r.CO_PAD-r.CO)))
     b = b.reshape(r.IT, r.CO_PRL)
     return b
 
 
 
-def reorder_w_q2e_conv(w, hw, r):
+def reorder_w_q2e_conv(w, hw, r):  # w: weight/kernel tensor, hw: Hardware config, r: Runtime params
     # (KH, KW, Ci, CO)
     w = np.pad(w, ((0,0),(0,0),(0,0),(0,r.CO_PAD-r.CO)))        # (KH, KW, CI, CO_PAD)
     w = w.reshape(r.KH, r.KW, r.CI, r.IT, r.CO_PRL)             # (KH, KW, CI, IT, CO_PRL)
@@ -190,7 +192,7 @@ def reorder_w_q2e_conv(w, hw, r):
 
 
 
-def reorder_x_q2e_conv(x, hw, r):
+def reorder_x_q2e_conv(x, hw, r):  # x: input activation tensor, hw: Hardware config, r: Runtime params
     print('input initial (XN, XH, XW, CI)=', x.shape)
 
     x = np.pad(x, ((0,0),(0,r.XL*hw.ROWS-r.XH),(0,0),(0,0)))         # (XN, L*HL , XW, CI)
@@ -231,7 +233,7 @@ def reorder_x_q2e_conv(x, hw, r):
 
 
 
-def reorder_y_q2e_conv(y, hw, r):
+def reorder_y_q2e_conv(y, hw, r):  # y: conv output tensor, hw: Hardware config, r: Runtime params
     '''
     This is engine output: no striding (H=H, L=XL), last W interchanged
     '''
@@ -251,7 +253,7 @@ def reorder_y_q2e_conv(y, hw, r):
     return y
 
 
-def reorder_y_e2q_conv(y, hw, r):
+def reorder_y_e2q_conv(y, hw, r):  # y: conv output tensor, hw: Hardware config, r: Runtime params
     '''
     This is engine output: no striding (H=H, L=XL), last W interchanged
     '''
@@ -273,7 +275,7 @@ def reorder_y_e2q_conv(y, hw, r):
     return y
 
 
-def pack_words_into_bytes (arr, bits):
+def pack_words_into_bytes (arr, bits):  # arr: flat array of quantized words, bits: bitwidth per word
     assert 8 % bits == 0, f"Bits {bits} should be factor of 8 for packing"
     w_words_per_byte = 8//bits
     arr = np.frombuffer(arr.astype(np.int8).tobytes(), dtype=np.uint8)
@@ -284,7 +286,7 @@ def pack_words_into_bytes (arr, bits):
     return arr[:,0].astype(np.uint8) # packed byte
 
 
-def predict_bundle_performance(hw, r):
+def predict_bundle_performance(hw, r):  # hw: Hardware config, r: Runtime params of one bundle
 
     clocks_p0 = r.IT*(1 + r.XN*r.XL*r.XW*(1 + r.CM_0*r.KH))
     clocks_p  = r.IT*(1 + r.XN*r.XL*r.XW*(1 + r.CM*r.KH))
