@@ -3,6 +3,7 @@ from typing import Optional
 from torch import nn
 
 from brevitas.inject.defaults import Int8ActPerTensorFloat
+from brevitas.nn.quant_activation import QuantIdentity as _QuantIdentity
 from brevitas.nn.quant_activation import QuantReLU as _QuantReLU
 from brevitas.nn.quant_activation import QuantSigmoid as _QuantSigmoid
 from brevitas.nn.quant_activation import QuantTanh as _QuantTanh
@@ -19,6 +20,27 @@ from brevitas.nn.quant_layer import QuantNonLinearActLayer as QuantNLAL
 - GELU /
 - Softmax
 '''
+
+class QuantIdentity(_QuantIdentity):
+    # Quantizes a tensor with no nonlinearity applied - use this instead of plain
+    # torch.nn.Identity() wherever a "no activation" slot still needs to carry real
+    # scale/bit-width metadata (e.g. between two convs in a residual block, before a
+    # QuantAvgPool2d/QuantAdaptiveAvgPool2d that requires a QuantTensor input, or any
+    # point that needs to round-trip through PTQ calibration and QONNX export as a
+    # proper quantized value rather than passing through as an unquantized float).
+    #
+    # Arguments:
+    #   - act_quant (optional): quantizer applied to the output. Default: Int8ActPerTensorFloat (8-bit, signed)
+    #   - return_quant_tensor (bool, optional): return an IntQuantTensor instead of a plain Tensor. Default: False
+    #   - bit_width (int, optional): overrides act_quant's bit width, e.g. 4
+    #
+    # Input:  x, any shape - Tensor or QuantTensor
+    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
+    #
+    # Usage:
+    #   core.act = QuantIdentity()                                    # 8-bit, no nonlinearity
+    #   core.act = QuantIdentity(bit_width=4, return_quant_tensor=True)  # feeds e.g. QuantAdaptiveAvgPool2d
+    pass
 
 class QuantReLU(_QuantReLU):
     # Arguments:
