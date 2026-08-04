@@ -21,15 +21,63 @@ from brevitas.nn.quant_layer import QuantNonLinearActLayer as QuantNLAL
 '''
 
 class QuantReLU(_QuantReLU):
+    # Arguments:
+    #   - act_quant (optional): quantizer applied to the output. Default: Uint8ActPerTensorFloat (8-bit, unsigned)
+    #   - input_quant (optional): quantizer applied to the input. Default: None (unquantized)
+    #   - bit_width (int, optional): overrides act_quant's bit width, e.g. 4
+    #   - return_quant_tensor (bool, optional): return an IntQuantTensor instead of a plain Tensor. Default: False
+    #
+    # Input:  x, any shape - Tensor or QuantTensor
+    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
+    #
+    # Usage:
+    #   relu = QuantReLU()
+    #   y = relu(x)  # 8-bit output (default)
+    #
+    #   relu4 = QuantReLU(bit_width=4, return_quant_tensor=True)
+    #   y = relu4(x)  # 4-bit output, returned as IntQuantTensor
     pass
 
 class QuantSigmoid(_QuantSigmoid):
+    # Arguments: same as QuantReLU (act_quant default: Uint8ActPerTensorFloat, 8-bit
+    #   unsigned; input_quant, bit_width, return_quant_tensor).
+    #
+    # Input:  x, any shape - Tensor or QuantTensor
+    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
+    #
+    # Usage:
+    #   sigmoid = QuantSigmoid(bit_width=4)
+    #   y = sigmoid(x)
     pass
 
 class QuantTanh(_QuantTanh):
+    # Arguments: same as QuantReLU, but act_quant defaults to Int8ActPerTensorFloat
+    #   (8-bit signed, since tanh's output range is [-1, 1]).
+    #
+    # Input:  x, any shape - Tensor or QuantTensor
+    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
+    #
+    # Usage:
+    #   tanh = QuantTanh(bit_width=4)
+    #   y = tanh(x)
     pass
 
 class QuantLeakyReLU(QuantNLAL):
+    # Wraps torch.nn.LeakyReLU with output quantization.
+    #
+    # Arguments:
+    #   - act_quant (optional): quantizer applied to the output. Default: Int8ActPerTensorFloat (8-bit, signed)
+    #   - input_quant (optional): quantizer applied to the input. Default: None (unquantized)
+    #   - bit_width (int, optional): overrides act_quant's bit width, e.g. 4
+    #   - return_quant_tensor (bool, optional): return an IntQuantTensor instead of a plain Tensor. Default: False
+    #   - **kwargs: forwarded to torch.nn.LeakyReLU (e.g. negative_slope)
+    #
+    # Input:  x, any shape - Tensor or QuantTensor
+    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
+    #
+    # Usage:
+    #   act = QuantLeakyReLU(bit_width=4)
+    #   y = act(x)
     def __init__(
             self,
             act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
@@ -46,6 +94,12 @@ class QuantLeakyReLU(QuantNLAL):
             **kwargs)
 
 class QuantSiLU(QuantNLAL):
+    # Wraps torch.nn.SiLU with output quantization. Arguments/Input/Output: same
+    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
+    #
+    # Usage:
+    #   act = QuantSiLU(bit_width=4)
+    #   y = act(x)
     def __init__(
             self,
             act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
@@ -62,6 +116,12 @@ class QuantSiLU(QuantNLAL):
             **kwargs)
 
 class QuantSELU(QuantNLAL):
+    # Wraps torch.nn.SELU with output quantization. Arguments/Input/Output: same
+    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
+    #
+    # Usage:
+    #   act = QuantSELU(bit_width=4)
+    #   y = act(x)
     def __init__(
             self,
             act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
@@ -78,6 +138,12 @@ class QuantSELU(QuantNLAL):
             **kwargs)
 
 class QuantGELU(QuantNLAL):
+    # Wraps torch.nn.GELU with output quantization. Arguments/Input/Output: same
+    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
+    #
+    # Usage:
+    #   act = QuantGELU(bit_width=4)
+    #   y = act(x)
     def __init__(
             self,
             act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
@@ -94,6 +160,14 @@ class QuantGELU(QuantNLAL):
             **kwargs)
 
 class QuantSoftMax(QuantNLAL):
+    # Wraps torch.nn.Softmax with output quantization. Arguments/Input/Output: same
+    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed),
+    # except passthrough_act=True - quantization noise means the output may not sum to
+    # exactly 1.0 per row.
+    #
+    # Usage:
+    #   softmax = QuantSoftMax()
+    #   y = softmax(x)  # y.sum(dim=-1) ~= 1.0
     def __init__(
             self,
             act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
