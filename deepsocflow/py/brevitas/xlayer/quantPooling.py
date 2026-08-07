@@ -1,6 +1,7 @@
+import torch.nn as nn
+
 from brevitas.nn.quant_avg_pool import TruncAvgPool2d as _TruncAvgPool2d
 from brevitas.nn.quant_avg_pool import TruncAdaptiveAvgPool2d as _TruncAdaptiveAvgPool2d
-import torch.nn as nn
 
 class QuantAvgPool2d(_TruncAvgPool2d):
 		# Average pool that truncates the accumulated sum to a fixed bit width, matching
@@ -48,6 +49,21 @@ class QuantAdaptiveAvgPool2d(_TruncAdaptiveAvgPool2d):
 		#   y = pool(relu(x))  # global average pool, any input H/W
 		pass
 
+class QuantMaxPool1d(nn.MaxPool1d):
+		# Plain (unquantized) max pool, 1D. See QuantMaxPool2d below for why max pooling
+		# needs no quantization arguments.
+		#
+		# Arguments: same as torch.nn.MaxPool1d (kernel_size, stride, padding, dilation,
+		#   return_indices, ceil_mode).
+		#
+		# Input:  x, shape (N, C, L) - Tensor or QuantTensor
+		# Output: shape (N, C, L_out) - same type as input
+		#
+		# Usage:
+		#   pool = QuantMaxPool1d(kernel_size=3, stride=2, padding=1)
+		#   y = pool(x)
+		pass
+
 class QuantMaxPool2d(nn.MaxPool2d):
 		# Plain (unquantized) max pool - max selects an existing value rather than
 		# accumulating one, so there is nothing to truncate/requantize. Works on a plain
@@ -64,6 +80,36 @@ class QuantMaxPool2d(nn.MaxPool2d):
 		#   y = pool(x)
 		pass
 
+class QuantMaxPool3d(nn.MaxPool3d):
+		# Plain (unquantized) max pool, 3D. See QuantMaxPool2d above for why max pooling
+		# needs no quantization arguments.
+		#
+		# Arguments: same as torch.nn.MaxPool3d (kernel_size, stride, padding, dilation,
+		#   return_indices, ceil_mode).
+		#
+		# Input:  x, shape (N, C, D, H, W) - Tensor or QuantTensor
+		# Output: shape (N, C, D_out, H_out, W_out) - same type as input
+		#
+		# Usage:
+		#   pool = QuantMaxPool3d(kernel_size=3, stride=2, padding=1)
+		#   y = pool(x)
+		pass
+
+class QuantAdaptiveMaxPool1d(nn.AdaptiveMaxPool1d):
+		# Adaptive (output-size-driven) version of QuantMaxPool1d.
+		#
+		# Arguments:
+		#   - output_size (int or tuple): target output length, e.g. 1
+		#   - return_indices (bool, optional): also return the indices of the max values. Default: False
+		#
+		# Input:  x, shape (N, C, L) - Tensor or QuantTensor
+		# Output: shape (N, C, output_size) - same type as input
+		#
+		# Usage:
+		#   pool = QuantAdaptiveMaxPool1d(output_size=1)
+		#   y = pool(x)
+		pass
+
 class QuantAdaptiveMaxPool2d(nn.AdaptiveMaxPool2d):
 		# Adaptive (output-size-driven) version of QuantMaxPool2d - same unquantized
 		# passthrough behavior, but the window/stride are computed from output_size.
@@ -77,5 +123,20 @@ class QuantAdaptiveMaxPool2d(nn.AdaptiveMaxPool2d):
 		#
 		# Usage:
 		#   pool = QuantAdaptiveMaxPool2d(output_size=(1, 1))
+		#   y = pool(x)
+		pass
+
+class QuantAdaptiveMaxPool3d(nn.AdaptiveMaxPool3d):
+		# Adaptive (output-size-driven) version of QuantMaxPool3d.
+		#
+		# Arguments:
+		#   - output_size (int or tuple): target output spatial size, e.g. (1, 1, 1)
+		#   - return_indices (bool, optional): also return the indices of the max values. Default: False
+		#
+		# Input:  x, shape (N, C, D, H, W) - Tensor or QuantTensor
+		# Output: shape (N, C, *output_size) - same type as input
+		#
+		# Usage:
+		#   pool = QuantAdaptiveMaxPool3d(output_size=(1, 1, 1))
 		#   y = pool(x)
 		pass
