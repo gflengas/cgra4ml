@@ -1144,6 +1144,155 @@ git commit -m "fix: hand XBundle.export 2-D tensors and supply bias shifts"
 
 ---
 
+### Task 6.6: Supply `softmax_frac`/`softmax_max_i`, and test the whole export path
+
+**Added mid-execution.** Task 7's second attempt got past `XBundle.export` and
+died in the `config_fw.h` writer: `AttributeError: 'BrevitasBundle' object has no
+attribute 'softmax_frac'` (`xmodel.py:234` reads `b.softmax_frac` and
+`b.softmax_max_i`).
+
+This is the third defect of one kind: **legacy sets an attribute inside
+`call_int`, and the adapter's deliberately inert `call_int` never runs.** Task 6.5
+fixed two of them and added a test for `.export()` — but `.export()` is only half
+the path. The `config_fw.h` writer lives further on, in `_export_bundles`, and
+nothing tests that. Step 1 below closes the class, not just this instance.
+
+**Values, taken from the legacy source rather than guessed:**
+- `xbundle.py:47-48` initialises `softmax_max_i = 0` and `softmax_frac = 0` for
+  every bundle, overriding them (lines 116-119) only on a softmax bundle.
+- `FixedPointModel` already carries the real values: `softmax_frac`
+  (`sim.py:190`) and `softmax_max_i` (`sim.py:194`).
+
+**One semantic mismatch to handle deliberately.** `sim.py:194` stores
+`softmax_max_i` as a **per-row array** — shape `(batch, 1)` — because it
+normalises each row separately. `config_fw.h` has a single scalar field per
+bundle, and legacy computes it as one global maximum
+(`int(softmax_out.max()*factor)`, `xbundle.py:119`). The hardware therefore uses
+one shared maximum for the whole batch; per-row values cannot be represented.
+Collapse with `int(np.max(...))` to match legacy and the C struct. This is a
+hardware limitation being honoured, not a precision bug being introduced — say so
+in the comment.
+
+**Files:**
+- Modify: `deepsocflow/py/brevitas/adapter.py`
+- Modify: `deepsocflow/test/py/test_brevitas_adapter.py`
+
+**Interfaces:**
+- Consumes: `build_bundles`, `BrevitasBundle` as they stand after Task 6.5
+- Produces: `BrevitasBundle.softmax_frac: int` and `BrevitasBundle.softmax_max_i: int`, both `0` unless the bundle carries softmax
+
+- [ ] **Step 1: Write the failing test**
+
+The second test is the important one — it drives `_export_bundles`, the same
+function the real driver calls, and would have caught all three defects.
+
+Append to `deepsocflow/test/py/test_brevitas_adapter.py`:
+
+```python
+def test_softmax_fields_default_to_zero_and_are_set_on_the_softmax_bundle(tmp_path):
+    """xmodel.py:234 reads b.softmax_frac and b.softmax_max_i. Legacy defaults
+    both to 0 (xbundle.py:47-48) and overrides them only on a softmax bundle."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    assert bundles[0].softmax_frac == 0
+    assert bundles[0].softmax_max_i == 0
+
+    # bundle 1 is the softmax bundle in this fixture
+    assert bundles[1].softmax_frac == 6          # its act_frac
+    assert isinstance(bundles[1].softmax_max_i, int), \
+        "config_fw.h has one scalar field per bundle; a per-row array cannot go in it"
+
+
+def test_full_legacy_export_path_runs_on_adapted_bundles(tmp_path, monkeypatch):
+    """Drives _export_bundles - the same function the real driver calls, and the
+    one that writes config_fw.h. .export() alone is only half the path: every
+    defect so far has been an attribute legacy sets inside call_int, which the
+    adapter no-ops, and several are read only by the config_fw.h writer."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.xmodel import _export_bundles
+
+    data_dir = tmp_path / 'vectors'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(data_dir))
+    build_bundles(_two_bundle_model(tmp_path), hw)
+
+    monkeypatch.chdir(tmp_path)   # config_fw.h is written to the CWD, not DATA_DIR
+    _export_bundles(hw, None)     # x=None: the adapter's call_int is a no-op
+
+    assert (tmp_path / "config_fw.h").exists(), "config_fw.h was not written"
+    assert any(data_dir.iterdir()), "no engine-layout files were written"
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: both new tests fail with `AttributeError: 'BrevitasBundle' object has no attribute 'softmax_frac'`.
+
+- [ ] **Step 3: Set the fields in the adapter**
+
+In `BrevitasBundle.__init__`, add the defaults alongside the existing attributes:
+
+```python
+        # Read by config_fw.h's writer (xmodel.py:234). Legacy defaults both to 0
+        # (xbundle.py:47-48) and fills them in inside call_int, which this
+        # adapter deliberately no-ops - so build_bundles sets them instead.
+        self.softmax_frac = 0
+        self.softmax_max_i = 0
+```
+
+In `build_bundles`, inside the existing `if is_last and cfg['softmax']:` branch,
+after `pre_softmax`/`out` are built, set them on the adapter once it exists. The
+simplest correct placement is to compute them in that branch:
+
+```python
+            softmax_frac = model.softmax_frac
+            # sim.py:194 keeps a per-row maximum (shape (batch, 1)); config_fw.h
+            # has ONE scalar per bundle and legacy uses a single global maximum
+            # (xbundle.py:119). The hardware shares one maximum across the batch,
+            # so collapse rather than pass an array.
+            softmax_max_i = int(np.max(model.softmax_max_i))
+        else:
+            pre_softmax = None
+            out = act_out
+            softmax_frac = 0
+            softmax_max_i = 0
+```
+
+and after constructing `adapter`, assign them:
+
+```python
+        adapter.softmax_frac = softmax_frac
+        adapter.softmax_max_i = softmax_max_i
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: 16 passed (14 from before plus these 2).
+
+- [ ] **Step 5: Confirm no regressions**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_sim.py deepsocflow/test/py/test_brevitas_export_inference.py -q`
+Expected: 20 passed
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deepsocflow/py/brevitas/adapter.py deepsocflow/test/py/test_brevitas_adapter.py
+git commit -m "fix: supply softmax_frac/softmax_max_i and test the full export path"
+```
+
+---
+
 ### Task 7: `export_rtl` driver
 
 Wire the adapter to the refactored legacy export. This produces the engine-layout files, `.bin` blobs, and `config_fw.h`.
