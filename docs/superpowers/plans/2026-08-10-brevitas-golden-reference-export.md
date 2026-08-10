@@ -12,12 +12,15 @@
 
 ## Global Constraints
 
-- Only work on the `brevitas-qonnx-backend` branch (already checked out).
-- **Do not run `git commit` or `git push` at any point in this plan** — the user
-  handles all commits/pushes themselves (per `CLAUDE.md` Working Agreement).
-  Where the writing-plans skill's default task structure would normally end in
-  a commit step, this plan ends each task at "run tests, confirm green"
-  instead — leave the working tree as-is for the user to review and commit.
+- **Commits happen in an isolated worktree/branch (`brevitas-golden-ref`,
+  branched from `brevitas-qonnx-backend`), never on `brevitas-qonnx-backend`
+  itself.** `CLAUDE.md`'s "the user handles commits" rule is about
+  `brevitas-qonnx-backend` directly — the user explicitly approved
+  implementer subagents committing inside this separate worktree so the
+  subagent-driven-development review loop (which diffs BASE→HEAD via git)
+  can function. Do not push this branch anywhere, and do not merge/rebase it
+  onto `brevitas-qonnx-backend` without the user doing that themselves.
+- Do not run `git push` at any point in this plan.
 - New test files must be named `deepsocflow/test/py/test_brevitas_*.py` exactly
   — `.gitignore` only un-ignores that pattern (and `test_suggest_weight_map.py`);
   any other name is silently untracked.
