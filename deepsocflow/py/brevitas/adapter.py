@@ -94,6 +94,12 @@ class BrevitasBundle:
         self.next_ibs = set()
         self.next_add_ibs = set()
 
+        # Read by config_fw.h's writer (xmodel.py:234). Legacy defaults both to 0
+        # (xbundle.py:47-48) and fills them in inside call_int, which this
+        # adapter deliberately no-ops - so build_bundles sets them instead.
+        self.softmax_frac = 0
+        self.softmax_max_i = 0
+
     def call_int(self, x, hw):
         """No-op: brevitas already computed every integer tensor and the adapter
         pre-populated them. Legacy XBundle.call_int recomputes the bundle in
@@ -164,9 +170,17 @@ def build_bundles(model, hw, has_bias=None):
             out = XTensor(
                 tensor=np.asarray(model.softmax_out, dtype=np.float32),
                 bits=None, float_only=True)
+            softmax_frac = model.softmax_frac
+            # sim.py:194 keeps a per-row maximum (shape (batch, 1)); config_fw.h
+            # has ONE scalar per bundle and legacy uses a single global maximum
+            # (xbundle.py:119). The hardware shares one maximum across the batch,
+            # so collapse rather than pass an array.
+            softmax_max_i = int(np.max(model.softmax_max_i))
         else:
             pre_softmax = None
             out = act_out
+            softmax_frac = 0
+            softmax_max_i = 0
 
         prev_ib = index_of[cfg['input']] if cfg['input'] is not None else None
         adapter = BrevitasBundle(
@@ -176,6 +190,9 @@ def build_bundles(model, hw, has_bias=None):
             out=out,
             pre_softmax=pre_softmax,
             prev_ib=prev_ib)
+
+        adapter.softmax_frac = softmax_frac
+        adapter.softmax_max_i = softmax_max_i
 
         adapters.append(adapter)
         BUNDLES.append(adapter)

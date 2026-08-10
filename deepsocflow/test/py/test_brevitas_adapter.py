@@ -236,3 +236,46 @@ def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
         assert b.xe is not None and len(b.xe) > 0
         assert len(b.ye_exp_p) == b.r.CP
         assert b.oe_exp_nhwc is not None
+
+
+def test_softmax_fields_default_to_zero_and_are_set_on_the_softmax_bundle(tmp_path):
+    """xmodel.py:234 reads b.softmax_frac and b.softmax_max_i. Legacy defaults
+    both to 0 (xbundle.py:47-48) and overrides them only on a softmax bundle."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    assert bundles[0].softmax_frac == 0
+    assert bundles[0].softmax_max_i == 0
+
+    # bundle 1 is the softmax bundle in this fixture
+    assert bundles[1].softmax_frac == 6          # its act_frac
+    assert isinstance(bundles[1].softmax_max_i, int), \
+        "config_fw.h has one scalar field per bundle; a per-row array cannot go in it"
+
+
+def test_full_legacy_export_path_runs_on_adapted_bundles(tmp_path, monkeypatch):
+    """Drives _export_bundles - the same function the real driver calls, and the
+    one that writes config_fw.h. .export() alone is only half the path: every
+    defect so far has been an attribute legacy sets inside call_int, which the
+    adapter no-ops, and several are read only by the config_fw.h writer."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.xmodel import _export_bundles
+
+    data_dir = tmp_path / 'vectors'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(data_dir))
+    build_bundles(_two_bundle_model(tmp_path), hw)
+
+    monkeypatch.chdir(tmp_path)   # config_fw.h is written to the CWD, not DATA_DIR
+    _export_bundles(hw, None)     # x=None: the adapter's call_int is a no-op
+
+    assert (tmp_path / "config_fw.h").exists(), "config_fw.h was not written"
+    assert any(data_dir.iterdir()), "no engine-layout files were written"
