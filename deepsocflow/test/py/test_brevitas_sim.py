@@ -223,3 +223,32 @@ def test_prefers_act_signed_field_over_name_based_fallback(tmp_path):
     # 252 - this is the discriminating case between the two range behaviors.
     out = model.forward(np.array([[127, 127]], dtype=np.int64))
     assert out.tolist() == [[127]]  # signed range [-128,127], not unsigned [0,255]
+
+
+def test_json_has_single_quantization_point_per_bundle():
+    """Regenerates the real XOR graph and checks every bundle after the first
+    has input_frac == the previous bundle's act_frac - i.e. Task 3's requant
+    step is now a structural no-op, not a band-aid."""
+    import json
+    import subprocess
+    import sys
+
+    # NOTE: deliberately uses this worktree's own checkout, not the brief's literal
+    # "/Users/charaphat/CERN/cgra4ml" - this task must run and be verified inside the
+    # brevitas-golden-ref worktree (a separate checkout on its own branch), and the
+    # main repo path points at an unrelated, actively-edited branch
+    # (brevitas-qonnx-backend) whose ptq.py/xor.py have diverged - running against it
+    # would test the wrong code and risk interfering with that other work.
+    repo_root = "/Users/charaphat/CERN/cgra4ml/.worktrees/brevitas-golden-ref"
+    subprocess.run([sys.executable, "-m", "deepsocflow.py.brevitas.xor"], check=True,
+                    cwd=repo_root, capture_output=True)
+
+    with open(f"{repo_root}/deepsocflow/py/brevitas/model/xor_graph.json") as f:
+        layers = json.load(f)["layers"]
+
+    names = list(layers.keys())
+    for i in range(1, len(names)):
+        prev, cur = layers[names[i - 1]], layers[names[i]]
+        assert cur["input_frac"] == prev["act_frac"], (
+            f"{names[i]}.input_frac ({cur['input_frac']}) != "
+            f"{names[i-1]}.act_frac ({prev['act_frac']})")

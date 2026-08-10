@@ -44,58 +44,53 @@ def _act_type_name(act):
 	return type(act).__name__.replace("Quant", "").lower()
 
 
-def _quantize_layer(layer, weight_bits=8, bias_bits=32):
+def _quantize_layer(layer, weight_bits=8, bias_bits=32, own_input_quant=True):
 	# Compute layers: plain torch type -> our xlayer quant equivalent.
 	LAYER_MAP = {
 		nn.Linear: QuantLinear,
 		nn.Conv1d: QuantConv1d,
 		nn.Conv2d: QuantConv2d,
 		nn.Conv3d: QuantConv3d,
-		# layers with batchnorm -> conv2dBN, linearBN, etc.
 	}
 	quant_cls = LAYER_MAP.get(type(layer))
 	if quant_cls is None:
 		return None
 
 	has_bias = layer.bias is not None
-	# Int32Bias only applies when there's an actual bias tensor to quantize - its scale
-	# is derived from input_scale * weight_scale, wide enough to match the accumulator.
-	# Since both of those are power-of-two here, the product is automatically a
-	# power-of-two too - no separate fixed-point bias quantizer needed. bias_bit_width
-	# overrides the "32" implied by the class name - brevitas honors it regardless.
 	bias_quant = Int32Bias if has_bias else None
 
-	# weight_quant/input_quant use power-of-two ("fixed-point") scale rather than an
-	# arbitrary float scale, so rescaling is a pure bit-shift in hardware (shift_round)
-	# instead of a real multiply/divide - required to match this project's RTL.
+	# own_input_quant=False means this layer consumes the previous bundle's
+	# activation output directly as an already-quantized QuantTensor (that
+	# activation was built with return_quant_tensor=True) instead of
+	# re-quantizing it - a single quantization point per bundle, matching
+	# qkeras's structure, instead of one after every activation AND one
+	# before every layer.
+	input_quant = Int8ActPerTensorFixedPoint if own_input_quant else None
+
 	if isinstance(layer, nn.Linear):
 		quant_layer = quant_cls(
 			layer.in_features, layer.out_features, bias=has_bias,
 			weight_quant=Int8WeightPerTensorFixedPoint, weight_bit_width=weight_bits,
-			input_quant=Int8ActPerTensorFixedPoint,
+			input_quant=input_quant,
 			bias_quant=bias_quant, bias_bit_width=bias_bits)
 	else:
 		kwargs = {name: getattr(layer, name) for name in _CONV_ATTRS}
 		quant_layer = quant_cls(
 			bias=has_bias,
 			weight_quant=Int8WeightPerTensorFixedPoint, weight_bit_width=weight_bits,
-			input_quant=Int8ActPerTensorFixedPoint,
+			input_quant=input_quant,
 			bias_quant=bias_quant, bias_bit_width=bias_bits, **kwargs)
 	quant_layer.load_state_dict(layer.state_dict(), strict=False)
 
-	# bias_quant.bit_width() can't be queried standalone (Int32Bias needs input_scale,
-	# only available mid-forward) - stash what we configured so print_graph() can show
-	# it right after construction, before any calibration/forward pass has happened.
 	quant_layer.configured_bias_bits = bias_bits if has_bias else None
+	quant_layer.has_own_input_quant = own_input_quant
 	return quant_layer
 
 
 def _quantize_activation(act):
 	# Activations: plain torch type -> (our xlayer quant equivalent, power-of-two scale
 	# act_quant matching its sign - Uint8 for ReLU/Sigmoid outputs, which are >= 0,
-	# Int8 for everything else). Covers LeakyReLU/SiLU/SELU/GELU, which brevitas.nn
-	# doesn't ship built-in (see xlayer/quantActivation.py) - the reason this maps
-	# through our own xlayer instead of brevitas.graph.quantize.
+	# Int8 for everything else).
 	ACT_MAP = {
 		nn.ReLU: (QuantReLU, Uint8ActPerTensorFixedPoint),
 		nn.Sigmoid: (QuantSigmoid, Uint8ActPerTensorFixedPoint),
@@ -110,7 +105,21 @@ def _quantize_activation(act):
 	if entry is None:
 		return None
 	quant_cls, act_quant = entry
-	return quant_cls(act_quant=act_quant)
+
+	# return_quant_tensor=True: every activation's output must carry its own
+	# scale/bit-width so the next bundle's layer (built with
+	# own_input_quant=False) can consume it directly instead of re-quantizing.
+	kwargs = {"act_quant": act_quant, "return_quant_tensor": True}
+
+	# Unsigned activations (ReLU/Sigmoid) are narrowed to bits-1 so their output
+	# still fits the signed datapath every other tensor in this project uses
+	# (mirrors xlayers.py:31-33: "QKeras treats relu as unsigned, we have
+	# everything signed, so we reduce bitwidth" - an unsigned 8-bit value can
+	# reach 255, which silently wraps when packed into a signed 8-bit word).
+	if act_quant is Uint8ActPerTensorFixedPoint:
+		kwargs["bit_width"] = 7
+
+	return quant_cls(**kwargs)
 
 
 def _quantize_pool(pool):
@@ -154,7 +163,8 @@ class quantized_model(nn.Module):
 			core = _quantize_layer(
 				layer,
 				weight_bits=overrides.get('weight_bits', weight_bits),
-				bias_bits=overrides.get('bias_bits', bias_bits))
+				bias_bits=overrides.get('bias_bits', bias_bits),
+				own_input_quant=(len(self.bundles) == 0))
 			if core is None:
 				raise ValueError(
 					f"quantized_model does not know how to quantize {type(layer).__name__}; "
@@ -227,7 +237,7 @@ class quantized_model(nn.Module):
 				name = f"bundle{idx}"
 				core = bundle.core
 
-				quant_input = core.input_quant(x)
+				quant_input = core.input_quant(x) if core.has_own_input_quant else x
 				quant_weight = core.quant_weight(quant_input)
 				quant_bias = core.bias_quant(core.bias, quant_input, quant_weight) if core.bias is not None else None
 
@@ -241,7 +251,7 @@ class quantized_model(nn.Module):
 				layer = {
 					"type": "linear" if hasattr(core, "in_features") else "conv",
 					"input": prev_name,
-					"input_bits": int(core.input_quant.bit_width().item()),
+					"input_bits": int(quant_input.bit_width.item()),
 					"input_signed": input_signed,
 					"input_frac": _frac_bits(quant_input.scale.item()),
 					"input_scale": quant_input.scale.item(),
