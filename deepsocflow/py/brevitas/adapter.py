@@ -31,21 +31,15 @@ def act_params(activation, negative_slope=0.0):
         f"(see CLAUDE.md Known Issues); only relu/identity/leaky_relu are deployable")
 
 
-def to_engine_weight(weight_int):
-    """torch Linear weight (out_features, in_features) -> legacy conv weight
-    (KH, KW, CI, CO) = (1, 1, in_features, out_features).
+def to_legacy_dense_weight(weight_int):
+    """torch Linear weight (out_features, in_features) -> legacy dense weight
+    (CI, CO) = (in_features, out_features).
 
-    The transpose is real: torch stores (out, in), keras stores (in, out)."""
-    return np.asarray(weight_int).T[None, None, :, :]
-
-
-def to_engine_activation(x_int):
-    """(batch, features) -> (XN, XH, XW, CI) = (1, batch, 1, features).
-
-    Batch goes in the H slot, not the N slot - this mirrors the legacy dense
-    reshape at xbundle.py:126. Getting it backwards produces wrong runtime
-    params (XL, X_PAD) without any error."""
-    return np.asarray(x_int)[None, :, None, :]
+    Only the transpose happens here. The reshape to the 4-D engine layout
+    (1, 1, CI, CO) is done by XBundle.export's own dense branch (xbundle.py:139),
+    which also reshapes x, y and the output - so everything this adapter hands to
+    the legacy path must stay 2-D."""
+    return np.asarray(weight_int).T
 
 
 from deepsocflow.py.utils import BUNDLES, XTensor
@@ -70,6 +64,15 @@ class _Core:
     type = 'dense'
     strides = (1, 1)
     padding = 'same'
+
+    # Read by config_fw.h's writer (xmodel.py:234). Legacy derives them in
+    # XDense.call_int via out.add_val_shift(self.b), which the adapter's inert
+    # call_int never runs. add_val_shift (utils.py:66-81) returns
+    # (max(y.frac,b.frac)-y.frac, max(y.frac,b.frac)-b.frac); brevitas's single
+    # quantization point per bundle makes bias_frac == acc_frac (sim.py:166
+    # asserts it), so both shifts are identically zero.
+    bias_val_shift = 0
+    bias_b_shift = 0
 
     def __init__(self, w, x, y, b, act):
         self.w, self.x, self.y, self.b, self.act = w, x, y, b, act
@@ -138,13 +141,13 @@ def build_bundles(model, hw, has_bias=None):
             out=act_out)
 
         w = XTensor(
-            tensor=to_engine_weight(cfg['weight']).astype(np.float32),
+            tensor=to_legacy_dense_weight(cfg['weight']).astype(np.float32),
             bits=hw.K_BITS, frac=cfg['weight_frac'], from_int=True)
         x = XTensor(
-            tensor=to_engine_activation(trace['x']).astype(np.float32),
+            tensor=np.asarray(trace['x'], dtype=np.float32),
             bits=cfg['input_bits'], frac=cfg['input_frac'], from_int=True)
         y = XTensor(
-            tensor=to_engine_activation(trace['y']).astype(np.float32),
+            tensor=np.asarray(trace['y'], dtype=np.float32),
             bits=hw.Y_BITS, frac=acc_frac, from_int=True)
 
         if has_bias.get(name, True):
@@ -156,10 +159,10 @@ def build_bundles(model, hw, has_bias=None):
         is_last = ib == len(model.bundle_order) - 1
         if is_last and cfg['softmax']:
             pre_softmax = XTensor(
-                tensor=to_engine_activation(model.pre_softmax).astype(np.float32),
+                tensor=np.asarray(model.pre_softmax, dtype=np.float32),
                 bits=cfg['act_bits'], frac=model.softmax_frac, from_int=True)
             out = XTensor(
-                tensor=to_engine_activation(model.softmax_out).astype(np.float32),
+                tensor=np.asarray(model.softmax_out, dtype=np.float32),
                 bits=None, float_only=True)
         else:
             pre_softmax = None

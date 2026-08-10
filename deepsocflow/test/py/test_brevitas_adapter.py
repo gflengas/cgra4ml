@@ -29,40 +29,6 @@ def test_act_params_rejects_unsupported_activation():
         act_params('silu')
 
 
-from deepsocflow.py.brevitas.adapter import to_engine_activation, to_engine_weight
-
-
-def test_to_engine_weight_shape_and_transpose():
-    # torch Linear weight is (out_features, in_features); keras/legacy wants
-    # (KH, KW, CI, CO) = (1, 1, in_features, out_features)
-    w = np.array([[1, 2],
-                  [3, 4],
-                  [5, 6]])          # (out=3, in=2)
-    e = to_engine_weight(w)
-    assert e.shape == (1, 1, 2, 3)
-    # element (in=0, out=1) must be w[out=1][in=0] == 3
-    assert e[0, 0, 0, 1] == 3
-    assert e[0, 0, 1, 2] == 6
-
-
-def test_to_engine_activation_puts_batch_in_h_slot():
-    # (batch, features) -> (XN, XH, XW, CI) = (1, batch, 1, features).
-    # Batch lands in H, NOT in N - see xbundle.py:126.
-    x = np.array([[0, 0],
-                  [0, 1],
-                  [1, 0],
-                  [1, 1]])          # (batch=4, features=2)
-    e = to_engine_activation(x)
-    assert e.shape == (1, 4, 1, 2)
-    assert e[0, 2, 0, 0] == 1       # row 2 is [1, 0]
-    assert e[0, 2, 0, 1] == 0
-
-
-def test_to_engine_roundtrip_preserves_values():
-    x = np.arange(12).reshape(4, 3)
-    assert to_engine_activation(x).flatten().tolist() == x.flatten().tolist()
-
-
 import json
 
 from deepsocflow.py.brevitas.sim import FixedPointModel
@@ -200,3 +166,73 @@ def test_bias_none_when_absent(tmp_path):
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
     bundles = build_bundles(model, hw, has_bias={"bundle0": False})
     assert bundles[0].core.b is None
+
+
+def test_to_legacy_dense_weight_transposes_to_in_out():
+    """torch stores a Linear weight as (out, in); legacy's dense branch expects
+    (CI, CO) = (in, out) and does the reshape to (1,1,CI,CO) itself."""
+    from deepsocflow.py.brevitas.adapter import to_legacy_dense_weight
+
+    w = np.array([[1, 2],
+                  [3, 4],
+                  [5, 6]])          # (out=3, in=2)
+    legacy = to_legacy_dense_weight(w)
+    assert legacy.shape == (2, 3)
+    assert legacy[0, 1] == 3        # element (in=0, out=1) is w[out=1][in=0]
+    assert legacy[1, 2] == 6
+
+
+def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
+    """xbundle.py:139 does `CI,CO = core.w.itensor.shape` — a 4-D tensor here
+    raises 'too many values to unpack'."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert len(b.core.w.itensor.shape) == 2, "weight must stay (CI, CO)"
+        assert len(b.core.x.itensor.shape) == 2, "input must stay (XN, CI)"
+        assert len(b.core.y.itensor.shape) == 2, "conv-sum must stay (XN, CO)"
+    assert bundles[-1].pre_softmax is not None
+    assert len(bundles[-1].pre_softmax.itensor.shape) == 2
+
+
+def test_core_exposes_bias_shifts(tmp_path):
+    """xmodel.py:234's config_fw.h writer reads these. Legacy computes them in
+    XDense.call_int, which the adapter's no-op call_int never runs."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert b.core.bias_val_shift == 0
+        assert b.core.bias_b_shift == 0
+
+
+def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
+    """The gap that let both defects through: no Task 6 test called .export().
+    This drives the real legacy reorder path end to end."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for i, b in enumerate(bundles):
+        b.export(hw, is_last=(i == len(bundles) - 1))
+
+    for b in bundles:
+        assert b.we is not None and len(b.we) > 0
+        assert b.xe is not None and len(b.xe) > 0
+        assert len(b.ye_exp_p) == b.r.CP
+        assert b.oe_exp_nhwc is not None
