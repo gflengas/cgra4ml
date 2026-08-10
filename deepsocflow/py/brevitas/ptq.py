@@ -176,7 +176,7 @@ class quantized_model(nn.Module):
 				core.act = quant_act
 				i += 1
 			else:
-				core.act = QuantIdentity(act_quant=Int8ActPerTensorFixedPoint)
+				core.act = QuantIdentity(act_quant=Int8ActPerTensorFixedPoint, return_quant_tensor=True)
 
 			softmax = i < len(children) and isinstance(children[i], nn.Softmax)
 			if softmax:

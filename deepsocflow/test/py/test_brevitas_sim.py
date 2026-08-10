@@ -232,18 +232,20 @@ def test_json_has_single_quantization_point_per_bundle():
     import json
     import subprocess
     import sys
+    from pathlib import Path
 
-    # NOTE: deliberately uses this worktree's own checkout, not the brief's literal
-    # "/Users/charaphat/CERN/cgra4ml" - this task must run and be verified inside the
-    # brevitas-golden-ref worktree (a separate checkout on its own branch), and the
-    # main repo path points at an unrelated, actively-edited branch
-    # (brevitas-qonnx-backend) whose ptq.py/xor.py have diverged - running against it
-    # would test the wrong code and risk interfering with that other work.
-    repo_root = "/Users/charaphat/CERN/cgra4ml/.worktrees/brevitas-golden-ref"
+    # NOTE: deliberately uses this checkout's own repo root, not the brief's literal
+    # "/Users/charaphat/CERN/cgra4ml" - that hardcodes one specific checkout and would
+    # break on a fresh clone, CI, or a differently-placed worktree (this file may live
+    # in a worktree whose repo root isn't the "main" checkout at all). Derived the same
+    # way xor.py:6 derives MODEL_DIR - relative to this file's own location - instead of
+    # a literal string. test/py/test_brevitas_sim.py -> test/py -> test -> deepsocflow ->
+    # repo root is 3 levels up from this file's parent directory.
+    repo_root = Path(__file__).resolve().parents[3]
     subprocess.run([sys.executable, "-m", "deepsocflow.py.brevitas.xor"], check=True,
                     cwd=repo_root, capture_output=True)
 
-    with open(f"{repo_root}/deepsocflow/py/brevitas/model/xor_graph.json") as f:
+    with open(repo_root / "deepsocflow" / "py" / "brevitas" / "model" / "xor_graph.json") as f:
         layers = json.load(f)["layers"]
 
     names = list(layers.keys())
