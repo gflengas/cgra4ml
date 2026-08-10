@@ -20,6 +20,19 @@
 - Out of scope: all six CLAUDE.md Known Issues, conv/pool/residual/flatten bundles, dropping the TensorFlow dependency.
 - The legacy dense→conv reshape puts **batch in the H slot**: `(batch, features)` → `(1, batch, 1, features)`. Getting this backwards silently produces wrong runtime params.
 
+**Environment (established during Task 1 — these override the raw commands written in later tasks):**
+
+- **Never run `cd run && python <script>.py`.** `site-packages/deepsocflow.pth` points at the MAIN repo (`/Users/charaphat/CERN/cgra4ml`), not this worktree, so running from `run/` silently executes the wrong copy of the code. Running from the worktree root is safe because cwd wins on `sys.path`.
+- **The host cannot simulate.** Verilator 5.050 (brew) breaks firebridge's re-entrant `eval()` pattern (SIGSEGV); Verilator 5.024 (which the project's own `Dockerfile:22` pins) cannot build against Apple clang 21's libc++. The simulator runs in a container instead.
+- **Run every script that simulates like this, from the worktree root:**
+
+  ```bash
+  python .superpowers/sdd/2026-08-11-brevitas-rtl-end-to-end/docker_sim.py run/<script>.py
+  ```
+
+  `docker_sim.py` inserts the worktree at `sys.path[0]`, monkeypatches `Hardware.simulate()` to build and run the testbench inside `deepsocflow-sim:v5.024`, chdirs to the script's own directory, and then runs it. Both problems above are handled; nothing in the repo needs changing.
+- Pure-Python work (pytest, `python -m deepsocflow.py.brevitas.main` without simulation) runs normally from the worktree root.
+
 ---
 
 ### Task 1: Phase 0 — prove the toolchain works
@@ -60,6 +73,149 @@ Expected: the script prints `SIMULATING...`, then per-bundle `Bundle N, Error: 0
 If the simulation passed, continue to Task 2. **If it failed for any reason other than the `export_vivado_tcl` assert, stop and report** — everything downstream assumes a working simulator, and debugging our adapter against a broken toolchain wastes the whole exercise.
 
 Nothing to commit in this task.
+
+---
+
+### Task 1.5: Fix the `ic_right` regression blocking Task 1
+
+**Added mid-execution.** Task 1 found that `run/example.py` fails inside
+`export_inference` before reaching the simulator:
+`InvalidArgumentError: filter depth must be strictly positive, got 0`.
+
+Root cause, confirmed via `git log -L 179,195:deepsocflow/py/xbundle.py`: commit
+`d3091e2` ("brevitas layers added") deleted the line `ic_right += CM_p` from
+`XBundle.export`'s per-pass loop while adding comments to it. `ic_left` and
+`ic_right` therefore stay `0`, so every pass slices `[0:0]`. That `CM_p` is now
+computed and never used is corroborating evidence the deletion was accidental.
+
+**Files:**
+- Modify: `deepsocflow/py/xbundle.py:182-191`
+- Test: `deepsocflow/test/py/test_xbundle_passes.py`
+
+**Interfaces:**
+- Consumes: `get_runtime_params` from `deepsocflow.py.dataflow`
+- Produces: `_pass_channel_slices(r) -> list[tuple[int, int]]` in `xbundle.py` — the `(ic_left, ic_right)` bound pair for each of `r.CP` passes
+
+- [ ] **Step 1: Write the failing test**
+
+Restoring one line would fix the symptom, but the bug was invisible because the
+slice arithmetic is inlined in a loop that needs a full built model to exercise.
+Extract it into a pure helper so it is unit-testable, then test the helper.
+
+```python
+# deepsocflow/test/py/test_xbundle_passes.py
+"""Guards the per-pass input-channel slicing in XBundle.export. Commit d3091e2
+dropped `ic_right += CM_p` from that loop while adding comments, making every
+pass slice [0:0]; nothing caught it because the arithmetic was inlined in a loop
+that needs a fully built model to reach."""
+from collections import namedtuple
+
+import pytest
+
+
+def _runtime(CP, CM_0, CM, CI):
+    return namedtuple('R', ['CP', 'CM_0', 'CM', 'CI'])(CP=CP, CM_0=CM_0, CM=CM, CI=CI)
+
+
+def test_single_pass_covers_all_channels():
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.xbundle import _pass_channel_slices
+
+    assert _pass_channel_slices(_runtime(CP=1, CM_0=3, CM=72, CI=3)) == [(0, 3)]
+
+
+def test_multi_pass_slices_are_contiguous_and_cover_all_channels():
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.xbundle import _pass_channel_slices
+
+    # CI=200 split as CM_0=56 then two full passes of 72
+    slices = _pass_channel_slices(_runtime(CP=3, CM_0=56, CM=72, CI=200))
+
+    assert len(slices) == 3
+    assert slices[0][0] == 0, "first pass must start at channel 0"
+    assert slices[-1][1] == 200, "last pass must end at CI"
+    for (_, prev_right), (next_left, _) in zip(slices, slices[1:]):
+        assert prev_right == next_left, "slices must be contiguous, no gaps"
+
+
+def test_no_slice_is_empty():
+    """The actual d3091e2 regression: every slice was [0:0], which TF's conv2d
+    rejects with 'filter depth must be strictly positive, got 0'."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.xbundle import _pass_channel_slices
+
+    for left, right in _pass_channel_slices(_runtime(CP=3, CM_0=56, CM=72, CI=200)):
+        assert right > left, f"empty channel slice [{left}:{right}]"
+
+
+def test_first_pass_uses_cm_0_and_rest_use_cm():
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.xbundle import _pass_channel_slices
+
+    slices = _pass_channel_slices(_runtime(CP=3, CM_0=56, CM=72, CI=200))
+    widths = [right - left for left, right in slices]
+    assert widths == [56, 72, 72]
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest deepsocflow/test/py/test_xbundle_passes.py -v`
+Expected: FAIL with `ImportError: cannot import name '_pass_channel_slices'`
+
+- [ ] **Step 3: Add the helper and use it in the loop**
+
+Add above `class XBundle` in `deepsocflow/py/xbundle.py`:
+
+```python
+def _pass_channel_slices(r):
+    """(ic_left, ic_right) input-channel bounds for each of r.CP passes.
+
+    Pass 0 handles r.CM_0 channels (the remainder), every later pass handles a
+    full r.CM. Extracted from XBundle.export so the arithmetic is unit-testable:
+    commit d3091e2 silently dropped the `ic_right += CM_p` increment here and
+    nothing caught it."""
+    slices = []
+    ic_left = ic_right = 0
+    for ip in range(r.CP):
+        ic_right += r.CM_0 if ip == 0 else r.CM
+        slices.append((ic_left, ic_right))
+        ic_left = ic_right
+    return slices
+```
+
+Then replace the loop body in `XBundle.export` (currently lines 182-191) with:
+
+```python
+        self.ye_exp_p = []  # ye_exp per pass (p)
+        for ic_left, ic_right in _pass_channel_slices(r):
+            wp = w_int[:,:, ic_left:ic_right, :]  # weight slice (w) for this pass (p)
+            xp = x_int[:,:,:, ic_left:ic_right ]  # input slice (x) for this pass (p)
+            yp = tf.keras.backend.conv2d(xp.astype(np.float32), wp.astype(np.float32), padding='same').numpy().astype(np.int32)  # conv-sum (y) for this pass (p)
+            self.ye_exp_p += [reorder_y_q2e_conv(yp, hw, r)]
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest deepsocflow/test/py/test_xbundle_passes.py -v`
+Expected: 4 passed
+
+- [ ] **Step 5: Confirm the original failure is gone**
+
+```bash
+cd run && python example.py
+```
+
+Expected: gets past `export_inference` — no `filter depth must be strictly
+positive` error. It may still fail later at `hw.export_vivado_tcl` (missing board
+`.tcl`); that is Task 1's known workaround and not your concern. If it fails
+anywhere else, report DONE_WITH_CONCERNS with the error.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deepsocflow/py/xbundle.py deepsocflow/test/py/test_xbundle_passes.py
+git commit -m "fix: restore per-pass channel increment dropped in d3091e2"
+```
 
 ---
 
