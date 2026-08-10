@@ -65,6 +65,9 @@ class FixedPointModel:
                     f"{sorted(SUPPORTED_ACTIVATIONS)} are piecewise-linear through the "
                     f"origin. See CLAUDE.md Known Issues.")
 
+            bias_cfg = cfg.get('bias')
+            bias_frac = bias_cfg['frac'] if bias_cfg is not None else cfg['input_frac'] + cfg['weight']['frac']
+
             self.bundles[name] = dict(
                 input=cfg.get('input'),
                 in_features=cfg['in_features'],
@@ -72,7 +75,7 @@ class FixedPointModel:
                 input_bits=cfg['input_bits'],
                 input_frac=cfg['input_frac'],
                 weight_frac=cfg['weight']['frac'],
-                bias_frac=cfg['bias']['frac'],
+                bias_frac=bias_frac,
                 activation=cfg['activation'],
                 act_bits=cfg['act_bits'],
                 act_frac=cfg['act_frac'],
@@ -89,7 +92,11 @@ class FixedPointModel:
             cfg = spec[name]
             bundle = self.bundles[name]
             bundle['weight'] = np.array(cfg['weight']['values'], dtype=np.int64)
-            bundle['bias'] = np.array(cfg['bias']['values'], dtype=np.int64)
+            bias_cfg = cfg.get('bias')
+            if bias_cfg is not None:
+                bundle['bias'] = np.array(bias_cfg['values'], dtype=np.int64)
+            else:
+                bundle['bias'] = np.zeros(bundle['out_features'], dtype=np.int64)
 
     def quantize_input(self, x_float):
         """Quantizes a real-valued input using the first bundle's input scale,
@@ -103,8 +110,14 @@ class FixedPointModel:
         return x_int.astype(np.int64)
 
     def forward(self, x_int):
-        outputs = {}
-        prev_frac = {}  # bundle name -> the frac its output is actually stored at
+        if any(b['weight'] is None for b in self.bundles.values()):
+            raise RuntimeError(
+                "FixedPointModel.forward() called before load_int_weights() - "
+                "weight/bias arrays are still None")
+
+        self.outputs = {}
+        self.trace = {}
+        prev_frac = {}
         x_int = np.asarray(x_int, dtype=np.int64)
 
         for name in self.bundle_order:
@@ -114,15 +127,9 @@ class FixedPointModel:
                 inp = x_int
                 inp_frac = self.bundles[self.bundle_order[0]]['input_frac']
             else:
-                inp = outputs[bundle['input']]
+                inp = self.outputs[bundle['input']]
                 inp_frac = prev_frac[bundle['input']]
 
-            # Requantize if the producing bundle's output frac doesn't match what
-            # this bundle's input_quant expects - ptq.py currently gives every
-            # QuantLinear its own input_quant (a second quantization point after
-            # each activation), so these can genuinely differ. Becomes a no-op
-            # once every bundle shares a single quantization point (see ptq.py's
-            # own_input_quant flag).
             if inp_frac != bundle['input_frac']:
                 inp = shift_round(inp, inp_frac - bundle['input_frac'])
                 inp = np.clip(inp, -2 ** (bundle['input_bits'] - 1), 2 ** (bundle['input_bits'] - 1) - 1)
@@ -131,22 +138,41 @@ class FixedPointModel:
             assert acc_frac == bundle['bias_frac'], (
                 f"bundle '{name}': accumulator frac {acc_frac} != bias frac {bundle['bias_frac']}")
 
-            acc = inp @ bundle['weight'].T + bundle['bias']  # int64, frac = acc_frac
+            y = inp @ bundle['weight'].T          # bias-free conv-sum (matmul only)
+            acc = y + bundle['bias']              # int64, frac = acc_frac
 
-            if bundle['activation'] == 'relu':
-                acc = np.clip(acc, 0, None)
-
-            out = shift_round(acc, acc_frac - bundle['act_frac'])
+            acc_for_shift = np.clip(acc, 0, None) if bundle['activation'] == 'relu' else acc
+            out = shift_round(acc_for_shift, acc_frac - bundle['act_frac'])
 
             if bundle['activation'] in UNSIGNED_ACTIVATIONS:
                 out = np.clip(out, 0, 2 ** bundle['act_bits'] - 1)
             else:
                 out = np.clip(out, -2 ** (bundle['act_bits'] - 1), 2 ** (bundle['act_bits'] - 1) - 1)
 
-            outputs[name] = out
+            self.trace[name] = {'x': inp, 'y': y, 'acc': acc, 'out': out}
+            self.outputs[name] = out
             prev_frac[name] = bundle['act_frac']
 
-        return outputs[self.bundle_order[-1]]
+        last_name = self.bundle_order[-1]
+        last_bundle = self.bundles[last_name]
+        logits_int = self.outputs[last_name]
+
+        if last_bundle['softmax']:
+            self.pre_softmax = logits_int
+            self.softmax_frac = last_bundle['act_frac']
+            logits_float = logits_int.astype(np.float64) / 2 ** self.softmax_frac
+            factor = 2 ** 17  # fixed-point scale used by the legacy hardware softmax
+            row_max = logits_float.max(axis=-1, keepdims=True)
+            self.softmax_max_i = (row_max * factor).astype(np.int64)
+            exp = np.exp(logits_float - row_max)
+            self.softmax_out = (exp / exp.sum(axis=-1, keepdims=True)).astype(np.float32)
+        else:
+            self.pre_softmax = None
+            self.softmax_frac = None
+            self.softmax_max_i = None
+            self.softmax_out = None
+
+        return logits_int
 
     def print_graph(self):
         rows = []

@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from deepsocflow.py.brevitas import sim
+from deepsocflow.py.brevitas.sim import FixedPointModel
 
 
 def _bundle(input_frac, input_bits, weight_values, weight_frac, weight_bits,
@@ -95,3 +96,107 @@ def test_requantizes_between_bundles_when_input_frac_differs_from_prev_act_frac(
     out = model.forward(np.array([[64, 64]], dtype=np.int64))
 
     assert out.tolist() == [[32]]
+
+
+def test_forward_records_trace_per_bundle(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6),
+        "bundle1": _bundle(input_frac=5, input_bits=8,
+                            weight_values=[[32]], weight_frac=5, weight_bits=8,
+                            bias_values=[0], bias_frac=10, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=5,
+                            input_name="bundle0"),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+    model.forward(np.array([[64, 64]], dtype=np.int64))
+
+    assert set(model.trace.keys()) == {"bundle0", "bundle1"}
+    for name in model.trace:
+        t = model.trace[name]
+        assert np.array_equal(t["acc"], t["y"] + model.bundles[name]["bias"])
+
+
+def test_forward_before_load_int_weights_raises(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)  # load_int_weights() deliberately NOT called
+
+    with pytest.raises(RuntimeError, match="load_int_weights"):
+        model.forward(np.array([[64, 64]], dtype=np.int64))
+
+
+def test_bias_less_layer_defaults_to_zeros(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            activation="identity", act_bits=8, act_frac=6),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+
+    out = model.forward(np.array([[64, 64]], dtype=np.int64))
+
+    # y = 64*64 + 64*64 = 8192 @ frac=13, bias=0 -> acc=8192
+    # shift_round(8192, 13-6=7) = 64 @ frac=6 (=1.0)
+    assert out.tolist() == [[64]]
+    assert model.trace["bundle0"]["acc"].tolist() == [[8192]]
+
+
+def test_softmax_output_matches_manual_softmax(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 0], [0, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0, 0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6, softmax=True),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+
+    logits_int = model.forward(np.array([[64, 0]], dtype=np.int64))
+
+    # weight is the identity matrix (scaled by 2**6), so bundle0's logits are
+    # exactly the (rescaled) input: x=[64,0] @ frac=7 (=[0.5,0.0]) times identity
+    # -> acc=[4096,0] @ frac=13 -> shift_round(.,7) -> int [32,0] @ act_frac=6
+    assert logits_int.tolist() == [[32, 0]]
+    assert model.pre_softmax.tolist() == logits_int.tolist()
+    assert model.softmax_frac == 6
+
+    logits_float = np.array([32, 0]) / 2 ** 6  # == [0.5, 0.0]
+    expected = np.exp(logits_float) / np.exp(logits_float).sum()
+    assert model.softmax_out[0].tolist() == pytest.approx(expected.tolist(), abs=1e-6)
+
+
+def test_unsupported_activation_raises(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="silu", act_bits=8, act_frac=6),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    with pytest.raises(ValueError, match="silu"):
+        FixedPointModel(json_path)
+
+
+def test_unsupported_layer_type_raises(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6, type_="conv"),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    with pytest.raises(ValueError, match="conv"):
+        FixedPointModel(json_path)
