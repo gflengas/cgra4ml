@@ -104,11 +104,28 @@ class FixedPointModel:
 
     def forward(self, x_int):
         outputs = {}
+        prev_frac = {}  # bundle name -> the frac its output is actually stored at
         x_int = np.asarray(x_int, dtype=np.int64)
 
         for name in self.bundle_order:
             bundle = self.bundles[name]
-            inp = outputs[bundle['input']] if bundle['input'] is not None else x_int
+
+            if bundle['input'] is None:
+                inp = x_int
+                inp_frac = self.bundles[self.bundle_order[0]]['input_frac']
+            else:
+                inp = outputs[bundle['input']]
+                inp_frac = prev_frac[bundle['input']]
+
+            # Requantize if the producing bundle's output frac doesn't match what
+            # this bundle's input_quant expects - ptq.py currently gives every
+            # QuantLinear its own input_quant (a second quantization point after
+            # each activation), so these can genuinely differ. Becomes a no-op
+            # once every bundle shares a single quantization point (see ptq.py's
+            # own_input_quant flag).
+            if inp_frac != bundle['input_frac']:
+                inp = shift_round(inp, inp_frac - bundle['input_frac'])
+                inp = np.clip(inp, -2 ** (bundle['input_bits'] - 1), 2 ** (bundle['input_bits'] - 1) - 1)
 
             acc_frac = bundle['input_frac'] + bundle['weight_frac']
             assert acc_frac == bundle['bias_frac'], (
@@ -127,6 +144,7 @@ class FixedPointModel:
                 out = np.clip(out, -2 ** (bundle['act_bits'] - 1), 2 ** (bundle['act_bits'] - 1) - 1)
 
             outputs[name] = out
+            prev_frac[name] = bundle['act_frac']
 
         return outputs[self.bundle_order[-1]]
 

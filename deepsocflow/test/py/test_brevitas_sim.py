@@ -70,3 +70,28 @@ def test_quantize_input_clips_to_input_bits(tmp_path):
 
     # 1.0 * 2**7 = 128, but signed int8 tops out at 127 - must clip, not wrap.
     assert x_int.tolist() == [[127, 0]]
+
+
+def test_requantizes_between_bundles_when_input_frac_differs_from_prev_act_frac(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6),
+        "bundle1": _bundle(input_frac=5, input_bits=8,
+                            weight_values=[[32]], weight_frac=5, weight_bits=8,
+                            bias_values=[0], bias_frac=10, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=5,
+                            input_name="bundle0"),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = sim.FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+
+    # bundle0: x=[0.5,0.5] (int [64,64] @ frac=7), weight=[1.0,1.0] (int [64,64] @ frac=6)
+    #   -> acc = 64*64 + 64*64 = 8192 @ frac=13 -> shift_round(8192, 7) = 64 @ frac=6 (=1.0)
+    # bundle1 expects its input at frac=5, but bundle0's output is at frac=6 - must
+    # requantize: shift_round(64, 6-5=1) = 32 @ frac=5 (still =1.0) before the matmul.
+    out = model.forward(np.array([[64, 64]], dtype=np.int64))
+
+    assert out.tolist() == [[32]]
