@@ -1380,6 +1380,140 @@ git commit -m "feat: export RTL engine-layout files from the brevitas backend"
 
 ---
 
+### Task 7.5: Fix `is_flatten`/`is_softmax` in the emitted `config_fw.h`
+
+**Added mid-execution.** Task 7 succeeded — 23/23 files match the reference by
+name and element count, and every shape-derived `config_fw.h` field matches — but
+it found one real bug in the emitted firmware config.
+
+`xmodel.py:233` writes:
+
+```python
+.is_flatten={1*(b.flatten is not None)}, .is_softmax={1*(b.softmax is not None)}
+```
+
+Legacy `XBundle.__init__` (`xbundle.py:41,44`) stores **`None`** when these are
+absent:
+
+```python
+self.flatten = Flatten() if flatten else None
+self.softmax = Activation("softmax") if softmax else None
+```
+
+The adapter instead stores `self.flatten = False` and `self.softmax = <bool>`.
+Since `False is not None` is `True`, the emitted config claims **every** bundle is
+flattened and softmaxed. The firmware would take both branches on every bundle.
+
+Note that `xbundle.py:144` and `xmodel.py:221` test the same attributes for plain
+truthiness, so the fix has to satisfy both idioms: `None` when absent, something
+truthy when present.
+
+This is the fourth defect of one family — the adapter's attribute *semantics*
+diverging from legacy's, invisible to attribute-level tests. So the test here
+asserts on the emitted `config_fw.h` text, which is the level that actually
+matters.
+
+**Files:**
+- Modify: `deepsocflow/py/brevitas/adapter.py`
+- Modify: `deepsocflow/test/py/test_brevitas_adapter.py`
+
+**Interfaces:**
+- Consumes: `build_bundles` as it stands after Task 6.6
+- Produces: no signature change — `BrevitasBundle.flatten` is now `None`, and `BrevitasBundle.softmax` is `True` or `None` rather than a bool
+
+- [ ] **Step 1: Write the failing test**
+
+Append to `deepsocflow/test/py/test_brevitas_adapter.py` (add `import re` at the
+top of the file if it is not already there):
+
+```python
+def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
+    """xmodel.py:233 emits these with `is not None`, and legacy stores None when
+    absent (xbundle.py:41,44). Storing False instead makes every bundle claim to
+    be flattened and softmaxed. Asserting on the emitted text rather than on the
+    attributes is deliberate: that is the level this bug is visible at."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.xmodel import _export_bundles
+
+    data_dir = tmp_path / 'vectors'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(data_dir))
+    build_bundles(_two_bundle_model(tmp_path), hw)
+
+    monkeypatch.chdir(tmp_path)
+    _export_bundles(hw, None)
+
+    text = (tmp_path / "config_fw.h").read_text()
+    flatten_flags = [int(v) for v in re.findall(r"\.is_flatten=\s*(\d+)", text)]
+    softmax_flags = [int(v) for v in re.findall(r"\.is_softmax=\s*(\d+)", text)]
+
+    assert flatten_flags == [0, 0], "no bundle in this fixture is flattened"
+    assert softmax_flags == [0, 1], "only the last bundle carries softmax"
+
+
+def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
+    """Legacy stores None; xmodel.py:233 tests `is not None` while xbundle.py:144
+    tests truthiness, so absent must be None and present must be truthy."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert b.flatten is None
+    assert bundles[0].softmax is None
+    assert bundles[1].softmax
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: both new tests fail — the first with `flatten_flags == [1, 1]` and `softmax_flags == [1, 1]`, the second on `b.flatten is None`.
+
+- [ ] **Step 3: Fix the adapter**
+
+In `BrevitasBundle.__init__`, replace the two assignments:
+
+```python
+        # None-vs-truthy matters: xmodel.py:233 emits is_flatten/is_softmax with
+        # `is not None`, while xbundle.py:144 and xmodel.py:221 test truthiness.
+        # Legacy stores None when absent (xbundle.py:41,44), so `False` here would
+        # make every bundle claim to be flattened and softmaxed.
+        self.flatten = None
+        self.softmax = True if softmax else None
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: 18 passed (16 from before plus these 2).
+
+- [ ] **Step 5: Confirm no regressions and re-check the export**
+
+```bash
+python -m pytest deepsocflow/test/py/test_brevitas_sim.py deepsocflow/test/py/test_brevitas_export_inference.py -q
+python -m deepsocflow.py.brevitas.main
+```
+Expected: 20 passed; then `main.py` runs to completion. Confirm the regenerated
+`config_fw.h` now shows `.is_flatten=0` on all three bundles and `.is_softmax=1`
+only on the last. Delete any stray `config_fw.h`/`mem_bytes.txt`/`util.txt` left
+at the repository root afterwards.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deepsocflow/py/brevitas/adapter.py deepsocflow/test/py/test_brevitas_adapter.py
+git commit -m "fix: emit is_flatten/is_softmax correctly in config_fw.h"
+```
+
+---
+
 ### Task 8: Phase 3 — RTL simulation passes
 
 The finish line.
