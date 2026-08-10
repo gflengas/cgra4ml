@@ -75,7 +75,14 @@ def export_inference(model, hw, batch_size=1):
 
     print("\n-----------STARTING EXPORT-----------\n")
 
+    return _export_bundles(hw, x)
 
+
+def _export_bundles(hw, x):
+    """Bundle loop shared by both backends. Assumes BUNDLES is already populated
+    and, for the brevitas backend, that each bundle's integer tensors are already
+    computed (its call_int is a no-op). `x` is the input XTensor consumed by
+    bundle 0's call_int; the brevitas backend passes None."""
     add_buffer_map = []
     out_buffer_map = []
 
