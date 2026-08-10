@@ -13,6 +13,22 @@ from deepsocflow.py.hardware import *
 from deepsocflow.py.dataflow import *
 
 
+def _pass_channel_slices(r):
+    """(ic_left, ic_right) input-channel bounds for each of r.CP passes.
+
+    Pass 0 handles r.CM_0 channels (the remainder), every later pass handles a
+    full r.CM. Extracted from XBundle.export so the arithmetic is unit-testable:
+    commit d3091e2 silently dropped the `ic_right += CM_p` increment here and
+    nothing caught it."""
+    slices = []
+    ic_left = ic_right = 0
+    for ip in range(r.CP):
+        ic_right += r.CM_0 if ip == 0 else r.CM
+        slices.append((ic_left, ic_right))
+        ic_left = ic_right
+    return slices
+
+
 @keras.saving.register_keras_serializable()
 class XBundle(Layer):
 
@@ -180,13 +196,9 @@ class XBundle(Layer):
         Prepare expected outputs for each pass
         '''
         self.ye_exp_p = []  # ye_exp per pass (p)
-        ic_left = ic_right = 0  # input-channel slice bounds for the current pass
-        for ip in range(r.CP):  # ip: pass index (0..CP-1)
-            CM_p = r.CM_0 if ip==0 else r.CM  # input channels handled in this pass
-
+        for ic_left, ic_right in _pass_channel_slices(r):
             wp = w_int[:,:, ic_left:ic_right, :]  # weight slice (w) for this pass (p)
             xp = x_int[:,:,:, ic_left:ic_right ]  # input slice (x) for this pass (p)
             yp = tf.keras.backend.conv2d(xp.astype(np.float32), wp.astype(np.float32), padding='same').numpy().astype(np.int32)  # conv-sum (y) for this pass (p)
             self.ye_exp_p += [reorder_y_q2e_conv(yp, hw, r)]
-            ic_left = ic_right
         self.hw, self.r = hw, r
