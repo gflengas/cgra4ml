@@ -3,7 +3,15 @@
 - Only work on the `brevitas-qonnx-backend` branch.
 - Do not `git commit` or `git push` anything — the user handles commits and pushes themselves.
 
+# Current Priority (2026-08-10)
+
+**Get the pipeline working genuinely end-to-end (python golden-reference → RTL), not just correct in isolation.** The Known Issues below are explicitly deprioritized until this is true - none of them block XOR's own correctness, and chasing them now would be scope creep ahead of proving the full chain works.
+
+Concretely, "end-to-end" is not yet true: `export.py::export_inference` only writes flat golden-reference text files (`y_exp.txt`, `{ib}_y_nhwc_exp.txt`). It does **not** write the engine-layout/binary files (`{ib}_{ip}_{it}_*`, `.bin` blobs) that RTL actually consumes - that reordering step (importing, not transcribing, the legacy `dataflow.py`'s reorder functions - see Progress Log 2026-08-10 entry) was deliberately deferred as "Phase 2" and is the next real gap to close. Until that exists and has been run against the actual RTL (even just XOR-sized), the pipeline is not end-to-end - it stops at a golden reference nothing downstream reads yet.
+
 # Known Issues
+
+*(Deprioritized - see Current Priority above. Revisit once the pipeline is genuinely end-to-end.)*
 
 ## `quantized_model.export_graph_json()` (deepsocflow/py/brevitas/ptq.py) is not sufficient for fixed-point simulation yet
 

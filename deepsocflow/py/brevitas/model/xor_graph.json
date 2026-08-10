@@ -16,30 +16,30 @@
         "zero_point": 0.0,
         "values": [
           [
-            28,
-            -20
+            -28,
+            -37
           ],
           [
-            120,
-            -120
+            87,
+            -85
           ],
           [
-            -105,
-            105
+            101,
+            -101
           ]
         ],
         "values_float": [
           [
-            0.4375,
-            -0.3125
+            -0.4375,
+            -0.578125
           ],
           [
-            1.875,
-            -1.875
+            1.359375,
+            -1.328125
           ],
           [
-            -1.640625,
-            1.640625
+            1.578125,
+            -1.578125
           ]
         ]
       },
@@ -52,90 +52,14 @@
         "scale": 0.0001220703125,
         "zero_point": 0.0,
         "values": [
-          11518,
-          0,
-          -1
+          -1587,
+          10837,
+          0
         ],
         "values_float": [
-          1.406005859375,
-          0.0,
-          -0.0001220703125
-        ]
-      },
-      "activation": "relu",
-      "act_bits": 7,
-      "act_frac": 6,
-      "act_scale": 0.015625,
-      "act_zero_point": 0.0,
-      "act_signed": false,
-      "softmax": false
-    },
-    "bundle1": {
-      "type": "linear",
-      "input": "bundle0",
-      "input_bits": 7,
-      "input_signed": false,
-      "input_frac": 6,
-      "input_scale": 0.015625,
-      "input_zero_point": 0.0,
-      "weight": {
-        "bits": 8,
-        "signed": true,
-        "frac": 5,
-        "scale": 0.03125,
-        "zero_point": 0.0,
-        "values": [
-          [
-            -10,
-            12,
-            -16
-          ],
-          [
-            -5,
-            -1,
-            6
-          ],
-          [
-            44,
-            -68,
-            -58
-          ]
-        ],
-        "values_float": [
-          [
-            -0.3125,
-            0.375,
-            -0.5
-          ],
-          [
-            -0.15625,
-            -0.03125,
-            0.1875
-          ],
-          [
-            1.375,
-            -2.125,
-            -1.8125
-          ]
-        ]
-      },
-      "in_features": 3,
-      "out_features": 3,
-      "bias": {
-        "bits": 16,
-        "signed": true,
-        "frac": 11,
-        "scale": 0.00048828125,
-        "zero_point": 0.0,
-        "values": [
-          -577,
-          -484,
-          2929
-        ],
-        "values_float": [
-          -0.28173828125,
-          -0.236328125,
-          1.43017578125
+          -0.1937255859375,
+          1.3228759765625,
+          -0.0
         ]
       },
       "activation": "relu",
@@ -146,9 +70,9 @@
       "act_signed": false,
       "softmax": false
     },
-    "bundle2": {
+    "bundle1": {
       "type": "linear",
-      "input": "bundle1",
+      "input": "bundle0",
       "input_bits": 7,
       "input_signed": false,
       "input_frac": 5,
@@ -162,26 +86,102 @@
         "zero_point": 0.0,
         "values": [
           [
-            17,
-            -12,
-            79
+            10,
+            -10,
+            0
           ],
           [
-            16,
-            -9,
-            -82
+            9,
+            43,
+            -73
+          ],
+          [
+            -12,
+            44,
+            -76
           ]
         ],
         "values_float": [
           [
-            0.53125,
-            -0.375,
-            2.46875
+            0.3125,
+            -0.3125,
+            -0.0
           ],
           [
-            0.5,
-            -0.28125,
-            -2.5625
+            0.28125,
+            1.34375,
+            -2.28125
+          ],
+          [
+            -0.375,
+            1.375,
+            -2.375
+          ]
+        ]
+      },
+      "in_features": 3,
+      "out_features": 3,
+      "bias": {
+        "bits": 16,
+        "signed": true,
+        "frac": 10,
+        "scale": 0.0009765625,
+        "zero_point": 0.0,
+        "values": [
+          -390,
+          0,
+          0
+        ],
+        "values_float": [
+          -0.380859375,
+          0.0,
+          -0.0
+        ]
+      },
+      "activation": "relu",
+      "act_bits": 7,
+      "act_frac": 6,
+      "act_scale": 0.015625,
+      "act_zero_point": 0.0,
+      "act_signed": false,
+      "softmax": false
+    },
+    "bundle2": {
+      "type": "linear",
+      "input": "bundle1",
+      "input_bits": 7,
+      "input_signed": false,
+      "input_frac": 6,
+      "input_scale": 0.015625,
+      "input_zero_point": 0.0,
+      "weight": {
+        "bits": 8,
+        "signed": true,
+        "frac": 5,
+        "scale": 0.03125,
+        "zero_point": 0.0,
+        "values": [
+          [
+            0,
+            80,
+            76
+          ],
+          [
+            4,
+            -60,
+            -78
+          ]
+        ],
+        "values_float": [
+          [
+            -0.0,
+            2.5,
+            2.375
+          ],
+          [
+            0.125,
+            -1.875,
+            -2.4375
           ]
         ]
       },
@@ -190,16 +190,16 @@
       "bias": {
         "bits": 16,
         "signed": true,
-        "frac": 10,
-        "scale": 0.0009765625,
+        "frac": 11,
+        "scale": 0.00048828125,
         "zero_point": 0.0,
         "values": [
-          -4284,
-          3477
+          -8481,
+          6996
         ],
         "values_float": [
-          -4.18359375,
-          3.3955078125
+          -4.14111328125,
+          3.416015625
         ]
       },
       "activation": "identity",
