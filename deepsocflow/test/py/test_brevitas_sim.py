@@ -54,3 +54,19 @@ def test_shift_round_rounds_half_to_even():
     n = np.array([-10, -6, -2, 2, 6, 10], dtype=np.int64)
     # dividing by 4 (s=2): exact-half results round to the nearest EVEN value
     assert sim.shift_round(n, 2).tolist() == [-2, -2, 0, 0, 2, 2]
+
+
+def test_quantize_input_clips_to_input_bits(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = sim.FixedPointModel(json_path)
+
+    x_int = model.quantize_input([[1.0, 0.0]])
+
+    # 1.0 * 2**7 = 128, but signed int8 tops out at 127 - must clip, not wrap.
+    assert x_int.tolist() == [[127, 0]]

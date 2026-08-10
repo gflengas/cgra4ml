@@ -69,6 +69,7 @@ class FixedPointModel:
                 input=cfg.get('input'),
                 in_features=cfg['in_features'],
                 out_features=cfg['out_features'],
+                input_bits=cfg['input_bits'],
                 input_frac=cfg['input_frac'],
                 weight_frac=cfg['weight']['frac'],
                 bias_frac=cfg['bias']['frac'],
@@ -91,9 +92,14 @@ class FixedPointModel:
             bundle['bias'] = np.array(cfg['bias']['values'], dtype=np.int64)
 
     def quantize_input(self, x_float):
-        """Quantizes a real-valued input using the first bundle's input scale."""
+        """Quantizes a real-valued input using the first bundle's input scale,
+        clipping to what its input_bits can represent (signed) - matches
+        brevitas's own input quantizer, which clips out-of-range values
+        instead of wrapping."""
         first = self.bundles[self.bundle_order[0]]
         x_int = np.rint(np.asarray(x_float, dtype=np.float64) * 2 ** first['input_frac'])
+        bits = first['input_bits']
+        x_int = np.clip(x_int, -2 ** (bits - 1), 2 ** (bits - 1) - 1)
         return x_int.astype(np.int64)
 
     def forward(self, x_int):
