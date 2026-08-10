@@ -68,6 +68,10 @@ class FixedPointModel:
             bias_cfg = cfg.get('bias')
             bias_frac = bias_cfg['frac'] if bias_cfg is not None else cfg['input_frac'] + cfg['weight']['frac']
 
+            act_signed = cfg.get('act_signed')
+            if act_signed is None:
+                act_signed = cfg['activation'] not in UNSIGNED_ACTIVATIONS
+
             self.bundles[name] = dict(
                 input=cfg.get('input'),
                 in_features=cfg['in_features'],
@@ -79,6 +83,7 @@ class FixedPointModel:
                 activation=cfg['activation'],
                 act_bits=cfg['act_bits'],
                 act_frac=cfg['act_frac'],
+                act_signed=act_signed,
                 softmax=cfg['softmax'],
                 weight=None,  # populated by load_int_weights()
                 bias=None,
@@ -144,10 +149,10 @@ class FixedPointModel:
             acc_for_shift = np.clip(acc, 0, None) if bundle['activation'] == 'relu' else acc
             out = shift_round(acc_for_shift, acc_frac - bundle['act_frac'])
 
-            if bundle['activation'] in UNSIGNED_ACTIVATIONS:
-                out = np.clip(out, 0, 2 ** bundle['act_bits'] - 1)
-            else:
+            if bundle['act_signed']:
                 out = np.clip(out, -2 ** (bundle['act_bits'] - 1), 2 ** (bundle['act_bits'] - 1) - 1)
+            else:
+                out = np.clip(out, 0, 2 ** bundle['act_bits'] - 1)
 
             self.trace[name] = {'x': inp, 'y': y, 'acc': acc, 'out': out}
             self.outputs[name] = out

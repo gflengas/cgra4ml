@@ -231,6 +231,10 @@ class quantized_model(nn.Module):
 				quant_weight = core.quant_weight(quant_input)
 				quant_bias = core.bias_quant(core.bias, quant_input, quant_weight) if core.bias is not None else None
 
+				input_signed = bool(quant_input.signed)
+				weight_signed = bool(quant_weight.signed)
+				bias_signed = bool(quant_bias.signed) if quant_bias is not None else None
+
 				w_scale = quant_weight.scale.item()
 				w_int = (quant_weight.value / w_scale).round().to(torch.int64).tolist()
 
@@ -238,11 +242,13 @@ class quantized_model(nn.Module):
 					"type": "linear" if hasattr(core, "in_features") else "conv",
 					"input": prev_name,
 					"input_bits": int(core.input_quant.bit_width().item()),
+					"input_signed": input_signed,
 					"input_frac": _frac_bits(quant_input.scale.item()),
 					"input_scale": quant_input.scale.item(),
 					"input_zero_point": quant_input.zero_point.item(),
 					"weight": {
 						"bits": int(quant_weight.bit_width.item()),
+						"signed": weight_signed,
 						"frac": _frac_bits(w_scale),
 						"scale": w_scale,
 						"zero_point": quant_weight.zero_point.item(),
@@ -258,6 +264,7 @@ class quantized_model(nn.Module):
 					b_scale = quant_bias.scale.item()
 					layer["bias"] = {
 						"bits": int(quant_bias.bit_width.item()),
+						"signed": bias_signed,
 						"frac": _frac_bits(b_scale),
 						"scale": b_scale,
 						"zero_point": quant_bias.zero_point.item(),
@@ -274,6 +281,7 @@ class quantized_model(nn.Module):
 					layer["act_frac"] = _frac_bits(act_scale)
 					layer["act_scale"] = act_scale
 					layer["act_zero_point"] = core.act.act_quant.zero_point().item()
+					layer["act_signed"] = bool(core.act.act_quant.is_signed)
 				layer["softmax"] = bundle.softmax is not None
 
 				layers[name] = layer

@@ -200,3 +200,26 @@ def test_unsupported_layer_type_raises(tmp_path):
     json_path = _write_graph(tmp_path, layers)
     with pytest.raises(ValueError, match="conv"):
         FixedPointModel(json_path)
+
+
+def test_prefers_act_signed_field_over_name_based_fallback(tmp_path):
+    # A relu bundle whose JSON explicitly marks act_signed=True (e.g. hand-edited,
+    # or from a future export where ReLU's output was clipped signed) must be
+    # treated as signed even though 'relu' is in UNSIGNED_ACTIVATIONS by name.
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[127, 127]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="relu", act_bits=8, act_frac=6),
+    }
+    layers["bundle0"]["act_signed"] = True
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+
+    # x=[127,127] @ frac=7, weight=[127,127] @ frac=6 -> acc=127*127+127*127=32258
+    # @ frac=13 -> relu(32258)=32258 (already >=0) -> shift_round(32258, 7) = 252
+    # pre-clip. Signed int8 clips this to 127; unsigned uint8 would leave it at
+    # 252 - this is the discriminating case between the two range behaviors.
+    out = model.forward(np.array([[127, 127]], dtype=np.int64))
+    assert out.tolist() == [[127]]  # signed range [-128,127], not unsigned [0,255]
