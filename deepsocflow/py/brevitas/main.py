@@ -1,5 +1,7 @@
 import os
 
+from deepsocflow.py.brevitas.export import export_inference
+from deepsocflow.py.brevitas.hardware import Hardware
 from deepsocflow.py.brevitas.sim import FixedPointModel
 from deepsocflow.py.brevitas.xor import X, Y
 
@@ -28,3 +30,14 @@ if __name__ == '__main__':
     print()
     print("Model graph:")
     model.print_graph()
+
+    # 3. export the golden-reference files a future RTL step will diff against
+    #    (batch_size=1 - matches the legacy dense convention, run/param_test.py)
+    hw = Hardware(
+        processing_elements=(8, 24),
+        bits_input=8, bits_weights=8, bits_bias=16, bits_sum=32,
+        data_dir=os.path.join(os.path.dirname(__file__), 'vectors'))
+
+    print()
+    result = export_inference(model, hw, X, batch_size=1)
+    print(f"Exported golden-reference files: {result['files']}")
