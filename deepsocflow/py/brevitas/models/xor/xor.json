@@ -1,0 +1,10 @@
+{
+  "layers": {
+    "hidden_1": {"type": "linear",  "in_features": 2, "out_features": 3, "bias": true},
+    "relu_1":   {"type": "relu"},
+    "hidden_2": {"type": "linear",  "in_features": 3, "out_features": 3, "bias": true},
+    "relu_2":   {"type": "relu"},
+    "out":      {"type": "linear",  "in_features": 3, "out_features": 2, "bias": true},
+    "softmax":  {"type": "softmax"}
+  }
+}

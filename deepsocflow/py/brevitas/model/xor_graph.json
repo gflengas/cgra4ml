@@ -1,0 +1,202 @@
+{
+  "layers": {
+    "bundle0": {
+      "type": "linear",
+      "input": null,
+      "input_bits": 8,
+      "input_frac": 7,
+      "input_scale": 0.0078125,
+      "input_zero_point": 0.0,
+      "weight": {
+        "bits": 8,
+        "frac": 6,
+        "scale": 0.015625,
+        "zero_point": 0.0,
+        "values": [
+          [
+            -25,
+            -43
+          ],
+          [
+            69,
+            -66
+          ],
+          [
+            105,
+            -105
+          ]
+        ],
+        "values_float": [
+          [
+            -0.390625,
+            -0.671875
+          ],
+          [
+            1.078125,
+            -1.03125
+          ],
+          [
+            1.640625,
+            -1.640625
+          ]
+        ]
+      },
+      "in_features": 2,
+      "out_features": 3,
+      "bias": {
+        "bits": 16,
+        "frac": 13,
+        "scale": 0.0001220703125,
+        "zero_point": 0.0,
+        "values": [
+          -1954,
+          8423,
+          0
+        ],
+        "values_float": [
+          -0.238525390625,
+          1.0281982421875,
+          0.0
+        ]
+      },
+      "activation": "relu",
+      "act_bits": 8,
+      "act_frac": 6,
+      "act_scale": 0.015625,
+      "act_zero_point": 0.0,
+      "softmax": false
+    },
+    "bundle1": {
+      "type": "linear",
+      "input": "bundle0",
+      "input_bits": 8,
+      "input_frac": 5,
+      "input_scale": 0.03125,
+      "input_zero_point": 0.0,
+      "weight": {
+        "bits": 8,
+        "frac": 5,
+        "scale": 0.03125,
+        "zero_point": 0.0,
+        "values": [
+          [
+            13,
+            68,
+            -82
+          ],
+          [
+            -14,
+            54,
+            -67
+          ],
+          [
+            3,
+            -41,
+            69
+          ]
+        ],
+        "values_float": [
+          [
+            0.40625,
+            2.125,
+            -2.5625
+          ],
+          [
+            -0.4375,
+            1.6875,
+            -2.09375
+          ],
+          [
+            0.09375,
+            -1.28125,
+            2.15625
+          ]
+        ]
+      },
+      "in_features": 3,
+      "out_features": 3,
+      "bias": {
+        "bits": 16,
+        "frac": 10,
+        "scale": 0.0009765625,
+        "zero_point": 0.0,
+        "values": [
+          0,
+          0,
+          1708
+        ],
+        "values_float": [
+          -0.0,
+          -0.0,
+          1.66796875
+        ]
+      },
+      "activation": "relu",
+      "act_bits": 8,
+      "act_frac": 6,
+      "act_scale": 0.015625,
+      "act_zero_point": 0.0,
+      "softmax": false
+    },
+    "bundle2": {
+      "type": "linear",
+      "input": "bundle1",
+      "input_bits": 8,
+      "input_frac": 5,
+      "input_scale": 0.03125,
+      "input_zero_point": 0.0,
+      "weight": {
+        "bits": 8,
+        "frac": 5,
+        "scale": 0.03125,
+        "zero_point": 0.0,
+        "values": [
+          [
+            36,
+            32,
+            -65
+          ],
+          [
+            -55,
+            -62,
+            55
+          ]
+        ],
+        "values_float": [
+          [
+            1.125,
+            1.0,
+            -2.03125
+          ],
+          [
+            -1.71875,
+            -1.9375,
+            1.71875
+          ]
+        ]
+      },
+      "in_features": 3,
+      "out_features": 2,
+      "bias": {
+        "bits": 16,
+        "frac": 10,
+        "scale": 0.0009765625,
+        "zero_point": 0.0,
+        "values": [
+          -607,
+          759
+        ],
+        "values_float": [
+          -0.5927734375,
+          0.7412109375
+        ]
+      },
+      "activation": "identity",
+      "act_bits": 8,
+      "act_frac": 4,
+      "act_scale": 0.0625,
+      "act_zero_point": 0.0,
+      "softmax": true
+    }
+  }
+}

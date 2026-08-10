@@ -1,3 +1,6 @@
+# Local-only notes (not tracked)
+deepsocflow/py/PARAMS_GLOSSARY.md
+
 # Generated files
 run/work*/config_fw.h
 run/work*/config_hw.svh
@@ -10,6 +13,9 @@ run/work*/sources.txt
 # Other files
 old/
 __pycache__
+
+# Local git worktrees (superpowers:using-git-worktrees)
+.worktrees/
 
 *.conf
 run/work/*.log
@@ -34,6 +40,8 @@ deepsocflow/test/models
 deepsocflow/test/temp
 
 deepsocflow/test/py/*
+!deepsocflow/test/py/test_brevitas_*.py
+!deepsocflow/test/py/test_suggest_weight_map.py
 
 .svls.toml
 .svlint.toml
@@ -90,6 +98,14 @@ docs/**
 docs/source/**
 !docs/source/conf.py
 !docs/source/*.rst
+
+# Superpowers specs/plans
+!docs/superpowers
+docs/superpowers/**
+!docs/superpowers/specs
+!docs/superpowers/specs/*.md
+!docs/superpowers/plans
+!docs/superpowers/plans/*.md
 
 # VSCode
 settings.json
