@@ -4,9 +4,10 @@ import numpy as np
 
 # Activations whose act_quant is unsigned (Uint8ActPerTensorFixedPoint in ptq.py's
 # ACT_MAP) - their quantized output range is [0, 2**bits-1], not the signed
-# [-2**(bits-1), 2**(bits-1)-1] used everywhere else. export_graph_json doesn't record
-# this per tensor yet (see CLAUDE.md Known Issues: "No signed/unsigned flag per
-# tensor"), so this mirrors ptq.py's ACT_MAP by activation name until that's fixed.
+# [-2**(bits-1), 2**(bits-1)-1] used everywhere else. export_graph_json now emits
+# act_signed/input_signed per tensor directly (ptq.py), so this name-based table is
+# only a fallback for JSONs exported before those fields existed - the primary
+# mechanism is reading act_signed/input_signed straight from the JSON.
 UNSIGNED_ACTIVATIONS = {'relu', 'sigmoid'}
 
 # Activations this simulator can execute in pure integer arithmetic today - anything
@@ -32,8 +33,12 @@ class FixedPointModel:
     # arithmetic - matmul + bias-add + shift_round + relu/identity, mirroring
     # deepsocflow/c/runtime.h's quant_lrelu exactly. This is a bit-exact software
     # model of what the C firmware/RTL actually computes - unlike brevitas itself
-    # (fake quantization: quantize+dequantize round-trip computed in float32), this
-    # never touches a float after construction.
+    # (fake quantization: quantize+dequantize round-trip computed in float32), the
+    # matmul/bias-add/shift_round/activation-clipping pipeline never touches a float
+    # after construction. The one deliberate exception is the softmax convenience
+    # output (forward()'s softmax_out): it's computed in float64 for readability
+    # since softmax is monotonic and argmax(logits_int) already equals
+    # argmax(softmax(logits)) without it - see the Usage note below.
     #
     # Usage:
     #   model = FixedPointModel(json_path)   # 1. build the graph topology
@@ -72,12 +77,21 @@ class FixedPointModel:
             if act_signed is None:
                 act_signed = cfg['activation'] not in UNSIGNED_ACTIVATIONS
 
+            # input_signed describes what THIS bundle expects to receive (not the
+            # producing bundle's own act_signed) - the real exported JSON always
+            # sets it now (ptq.py), so the True fallback only matters for older
+            # JSONs that predate the field.
+            input_signed = cfg.get('input_signed')
+            if input_signed is None:
+                input_signed = True
+
             self.bundles[name] = dict(
                 input=cfg.get('input'),
                 in_features=cfg['in_features'],
                 out_features=cfg['out_features'],
                 input_bits=cfg['input_bits'],
                 input_frac=cfg['input_frac'],
+                input_signed=input_signed,
                 weight_frac=cfg['weight']['frac'],
                 bias_frac=bias_frac,
                 activation=cfg['activation'],
@@ -105,13 +119,19 @@ class FixedPointModel:
 
     def quantize_input(self, x_float):
         """Quantizes a real-valued input using the first bundle's input scale,
-        clipping to what its input_bits can represent (signed) - matches
-        brevitas's own input quantizer, which clips out-of-range values
-        instead of wrapping."""
+        clipping to what its input_bits can represent, matching brevitas's own
+        input quantizer (which clips out-of-range values instead of wrapping).
+        Branches on the first bundle's own input_signed like forward()'s
+        inter-bundle requant does, though in practice this is always signed:
+        the first bundle's input_quant is always Int8ActPerTensorFixedPoint
+        (ptq.py), never the unsigned variant."""
         first = self.bundles[self.bundle_order[0]]
         x_int = np.rint(np.asarray(x_float, dtype=np.float64) * 2 ** first['input_frac'])
         bits = first['input_bits']
-        x_int = np.clip(x_int, -2 ** (bits - 1), 2 ** (bits - 1) - 1)
+        if first['input_signed']:
+            x_int = np.clip(x_int, -2 ** (bits - 1), 2 ** (bits - 1) - 1)
+        else:
+            x_int = np.clip(x_int, 0, 2 ** bits - 1)
         return x_int.astype(np.int64)
 
     def forward(self, x_int):
@@ -137,7 +157,10 @@ class FixedPointModel:
 
             if inp_frac != bundle['input_frac']:
                 inp = shift_round(inp, inp_frac - bundle['input_frac'])
-                inp = np.clip(inp, -2 ** (bundle['input_bits'] - 1), 2 ** (bundle['input_bits'] - 1) - 1)
+                if bundle['input_signed']:
+                    inp = np.clip(inp, -2 ** (bundle['input_bits'] - 1), 2 ** (bundle['input_bits'] - 1) - 1)
+                else:
+                    inp = np.clip(inp, 0, 2 ** bundle['input_bits'] - 1)
 
             acc_frac = bundle['input_frac'] + bundle['weight_frac']
             assert acc_frac == bundle['bias_frac'], (

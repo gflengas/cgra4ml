@@ -225,6 +225,49 @@ def test_prefers_act_signed_field_over_name_based_fallback(tmp_path):
     assert out.tolist() == [[127]]  # signed range [-128,127], not unsigned [0,255]
 
 
+def test_requant_clip_respects_unsigned_input_signed_flag(tmp_path):
+    """Regression test for the requant-clip bug: forward()'s inter-bundle requant
+    branch used to hardcode a SIGNED clip range regardless of the consuming
+    bundle's own input_signed field. bundle1 here declares input_signed=False
+    (as a real exported JSON does for a bundle fed by a narrowed unsigned ReLU),
+    and the shift lands the requantized value at 200 - inside unsigned uint8's
+    [0,255] but past signed int8's [-128,127]. The old hardcoded-signed clip
+    would have wrongly chopped this down to 127; the fix must leave it at 200.
+    This is not a tautology: the two behaviors (signed vs unsigned clip) produce
+    numerically different, independently-computable results, and the test
+    asserts the unsigned one."""
+    layers = {
+        # bundle0: identity pass-through so x_int=100 (fed directly to forward(),
+        # bypassing quantize_input) becomes bundle0's output unchanged: weight=1
+        # (value 1 @ frac 0), bias=0, input_frac==act_frac==6 so shift_round is a
+        # no-op (s=0). act_signed=False mirrors a real unsigned-ReLU producer.
+        "bundle0": _bundle(input_frac=6, input_bits=8,
+                            weight_values=[[1]], weight_frac=0, weight_bits=8,
+                            bias_values=[0], bias_frac=6, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=6),
+        # bundle1: input_frac=7 vs bundle0's act_frac=6 forces the inter-bundle
+        # requant branch to fire with a LEFT shift (shift_round(100, 6-7=-1) ->
+        # 100 << 1 = 200), landing outside signed int8's range but inside
+        # unsigned uint8's - the discriminating case.
+        "bundle1": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[0]], weight_frac=0, weight_bits=8,
+                            bias_values=[0], bias_frac=7, bias_bits=16,
+                            activation="identity", act_bits=8, act_frac=7,
+                            input_name="bundle0"),
+    }
+    layers["bundle0"]["act_signed"] = False
+    layers["bundle1"]["input_signed"] = False
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+
+    model.forward(np.array([[100]], dtype=np.int64))
+
+    # trace['bundle1']['x'] is the already-clipped, requantized value used as
+    # bundle1's matmul input - exactly the value the buggy clip corrupted.
+    assert model.trace["bundle1"]["x"].tolist() == [[200]]
+
+
 def test_json_has_single_quantization_point_per_bundle():
     """Regenerates the real XOR graph and checks every bundle after the first
     has input_frac == the previous bundle's act_frac - i.e. Task 3's requant
