@@ -41,3 +41,11 @@ if __name__ == '__main__':
     print()
     result = export_inference(model, hw, X, batch_size=1)
     print(f"Exported golden-reference files: {result['files']}")
+
+    # 4. export the engine-layout files (.txt/.bin, config_fw.h) the RTL
+    #    testbench consumes, using all four XOR rows.
+    from deepsocflow.py.brevitas.export import export_rtl
+
+    print()
+    rtl_result = export_rtl(model, hw, X, batch_size=4)
+    print(f"Exported {len(rtl_result['files'])} RTL files to {hw.DATA_DIR}")

@@ -116,3 +116,33 @@ def export_inference(model, hw, x_float, data_dir=None, clean=True, batch_size=1
         'softmax_frac': model.softmax_frac,
         'softmax_max_i': model.softmax_max_i,
     }
+
+
+def export_rtl(model, hw, x_float, batch_size=4):
+    """Exports everything the RTL testbench consumes - engine-layout text files,
+    packed .bin blobs, and config_fw.h - by adapting this model's bundles onto
+    the legacy XBundle surface and reusing the legacy export path.
+
+    Unlike export_inference (which writes layout-independent golden reference
+    text and is left untouched), this drives the real hardware file format.
+
+    config_fw.h is written to the CURRENT WORKING DIRECTORY by the legacy
+    exporter (xmodel.py), not into hw.DATA_DIR - run this from the directory
+    where the firmware build expects it."""
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.xmodel import _export_bundles
+
+    x_int = model.quantize_input(np.asarray(x_float)[:batch_size])
+    model.forward(x_int)
+
+    check_hardware(model, hw)
+    build_bundles(model, hw)
+
+    os.makedirs(hw.DATA_DIR, exist_ok=True)
+    for entry in os.scandir(hw.DATA_DIR):
+        os.remove(entry.path)
+
+    _export_bundles(hw, None)  # x=None: the adapter's call_int is a no-op
+
+    files = sorted(entry.path for entry in os.scandir(hw.DATA_DIR))
+    return {'files': files}
