@@ -935,6 +935,215 @@ git commit -m "feat: build legacy-compatible bundles from a brevitas FixedPointM
 
 ---
 
+### Task 6.5: Feed `XBundle.export` 2-D tensors, and supply the bias shifts
+
+**Added mid-execution.** Task 6's review and Task 7's implementer independently
+hit the same defect, which originates in this plan's own Task 6 Step 3 code.
+
+**Defect 1 (Critical) — double reshape.** `XBundle.export`'s dense branch
+(`xbundle.py:137-145`) performs the entire dense→conv reshape *itself*, from 2-D
+inputs:
+
+```python
+CI,CO = self.core.w.itensor.shape          # expects 2-D
+w_int = ... .reshape(1,1,CI,CO)
+x_int = ... .reshape(1,XN,1,CI)
+y_int = ... .reshape(1,XN,1,CO)
+o_int = (self.pre_softmax if self.softmax else self.out).itensor.numpy().reshape(1,XN,1,CO)
+```
+
+Task 6 pre-reshaped to 4-D via `to_engine_weight`/`to_engine_activation`, so the
+unpack raises `ValueError: too many values to unpack (expected 2)`. Setting
+`_Core.type = 'conv'` does not rescue it — the conv branch then asserts
+`o_shape == (XN,YH,YW,CO)` while `out` is still 2-D.
+
+**Defect 2 (Important) — missing bias shifts.** `xmodel.py:234` reads
+`b.core.bias_val_shift` and `b.core.bias_b_shift` when writing `config_fw.h`.
+Legacy sets them inside `XDense.call_int` (`xlayers.py:121`), which the adapter's
+deliberately inert `call_int` never runs.
+
+Both are 0 here, provably: `add_val_shift` (`utils.py:66-81`) returns
+`(max(y.frac,b.frac) - y.frac, max(y.frac,b.frac) - b.frac)`, and brevitas's
+single-quantization-point design makes `bias_frac == acc_frac` — `sim.py:166`
+asserts exactly that. Equal fracs give zero shifts on both sides.
+
+**Files:**
+- Modify: `deepsocflow/py/brevitas/adapter.py`
+- Modify: `deepsocflow/test/py/test_brevitas_adapter.py`
+
+**Interfaces:**
+- Consumes: `build_bundles` as built in Task 6
+- Produces: `to_legacy_dense_weight(weight_int) -> np.ndarray` of shape `(in_features, out_features)`, replacing `to_engine_weight` and `to_engine_activation` (both deleted — legacy does the reshaping, so they have no caller)
+
+- [ ] **Step 1: Write the failing test**
+
+The root cause of both defects is that no Task 6 test ever called `.export()`.
+This test does, and would have caught both.
+
+In `deepsocflow/test/py/test_brevitas_adapter.py`, DELETE the three tests
+`test_to_engine_weight_shape_and_transpose`, `test_to_engine_activation_puts_batch_in_h_slot`,
+and `test_to_engine_roundtrip_preserves_values`, along with the mid-file
+`from deepsocflow.py.brevitas.adapter import to_engine_activation, to_engine_weight`
+import. Then append:
+
+```python
+def test_to_legacy_dense_weight_transposes_to_in_out():
+    """torch stores a Linear weight as (out, in); legacy's dense branch expects
+    (CI, CO) = (in, out) and does the reshape to (1,1,CI,CO) itself."""
+    from deepsocflow.py.brevitas.adapter import to_legacy_dense_weight
+
+    w = np.array([[1, 2],
+                  [3, 4],
+                  [5, 6]])          # (out=3, in=2)
+    legacy = to_legacy_dense_weight(w)
+    assert legacy.shape == (2, 3)
+    assert legacy[0, 1] == 3        # element (in=0, out=1) is w[out=1][in=0]
+    assert legacy[1, 2] == 6
+
+
+def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
+    """xbundle.py:139 does `CI,CO = core.w.itensor.shape` — a 4-D tensor here
+    raises 'too many values to unpack'."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert len(b.core.w.itensor.shape) == 2, "weight must stay (CI, CO)"
+        assert len(b.core.x.itensor.shape) == 2, "input must stay (XN, CI)"
+        assert len(b.core.y.itensor.shape) == 2, "conv-sum must stay (XN, CO)"
+    assert bundles[-1].pre_softmax is not None
+    assert len(bundles[-1].pre_softmax.itensor.shape) == 2
+
+
+def test_core_exposes_bias_shifts(tmp_path):
+    """xmodel.py:234's config_fw.h writer reads these. Legacy computes them in
+    XDense.call_int, which the adapter's no-op call_int never runs."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert b.core.bias_val_shift == 0
+        assert b.core.bias_b_shift == 0
+
+
+def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
+    """The gap that let both defects through: no Task 6 test called .export().
+    This drives the real legacy reorder path end to end."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for i, b in enumerate(bundles):
+        b.export(hw, is_last=(i == len(bundles) - 1))
+
+    for b in bundles:
+        assert b.we is not None and len(b.we) > 0
+        assert b.xe is not None and len(b.xe) > 0
+        assert len(b.ye_exp_p) == b.r.CP
+        assert b.oe_exp_nhwc is not None
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: the four new tests fail — `ImportError: cannot import name 'to_legacy_dense_weight'` for the first, and for the rest either that same import error's absence plus `ValueError: too many values to unpack (expected 2)` from `.export()`, or `AttributeError: '_Core' object has no attribute 'bias_val_shift'`.
+
+- [ ] **Step 3: Fix the adapter**
+
+In `deepsocflow/py/brevitas/adapter.py`, DELETE `to_engine_weight` and
+`to_engine_activation` entirely and add in their place:
+
+```python
+def to_legacy_dense_weight(weight_int):
+    """torch Linear weight (out_features, in_features) -> legacy dense weight
+    (CI, CO) = (in_features, out_features).
+
+    Only the transpose happens here. The reshape to the 4-D engine layout
+    (1, 1, CI, CO) is done by XBundle.export's own dense branch (xbundle.py:139),
+    which also reshapes x, y and the output - so everything this adapter hands to
+    the legacy path must stay 2-D."""
+    return np.asarray(weight_int).T
+```
+
+In `_Core`, add the two bias-shift attributes with their justification:
+
+```python
+class _Core:
+    type = 'dense'
+    strides = (1, 1)
+    padding = 'same'
+
+    # Read by config_fw.h's writer (xmodel.py:234). Legacy derives them in
+    # XDense.call_int via out.add_val_shift(self.b), which the adapter's inert
+    # call_int never runs. add_val_shift (utils.py:66-81) returns
+    # (max(y.frac,b.frac)-y.frac, max(y.frac,b.frac)-b.frac); brevitas's single
+    # quantization point per bundle makes bias_frac == acc_frac (sim.py:166
+    # asserts it), so both shifts are identically zero.
+    bias_val_shift = 0
+    bias_b_shift = 0
+
+    def __init__(self, w, x, y, b, act):
+        self.w, self.x, self.y, self.b, self.act = w, x, y, b, act
+```
+
+In `build_bundles`, stop pre-reshaping. Replace the `w`/`x`/`y` construction with:
+
+```python
+        w = XTensor(
+            tensor=to_legacy_dense_weight(cfg['weight']).astype(np.float32),
+            bits=hw.K_BITS, frac=cfg['weight_frac'], from_int=True)
+        x = XTensor(
+            tensor=np.asarray(trace['x'], dtype=np.float32),
+            bits=cfg['input_bits'], frac=cfg['input_frac'], from_int=True)
+        y = XTensor(
+            tensor=np.asarray(trace['y'], dtype=np.float32),
+            bits=hw.Y_BITS, frac=acc_frac, from_int=True)
+```
+
+and the softmax branch's two tensors with:
+
+```python
+            pre_softmax = XTensor(
+                tensor=np.asarray(model.pre_softmax, dtype=np.float32),
+                bits=cfg['act_bits'], frac=model.softmax_frac, from_int=True)
+            out = XTensor(
+                tensor=np.asarray(model.softmax_out, dtype=np.float32),
+                bits=None, float_only=True)
+```
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_adapter.py -v`
+Expected: 14 passed (13 from before, minus the 3 deleted, plus the 4 new).
+
+- [ ] **Step 5: Confirm no regressions**
+
+Run: `python -m pytest deepsocflow/test/py/test_brevitas_sim.py deepsocflow/test/py/test_brevitas_export_inference.py -q`
+Expected: 20 passed
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add deepsocflow/py/brevitas/adapter.py deepsocflow/test/py/test_brevitas_adapter.py
+git commit -m "fix: hand XBundle.export 2-D tensors and supply bias shifts"
+```
+
+---
+
 ### Task 7: `export_rtl` driver
 
 Wire the adapter to the refactored legacy export. This produces the engine-layout files, `.bin` blobs, and `config_fw.h`.
