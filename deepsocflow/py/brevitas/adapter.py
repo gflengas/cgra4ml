@@ -21,6 +21,9 @@ def act_params(activation, negative_slope=0.0):
     if activation == 'identity':
         return 1, 0
     if activation == 'leaky_relu':
+        assert negative_slope > 0, (
+            f"negative_slope={negative_slope} must be a negative power of two "
+            f"(0.5, 0.25, 0.125, ...) - quant_lrelu implements it as a shift")
         log_slope = math.log2(negative_slope)
         assert log_slope == int(log_slope) and log_slope <= 0, (
             f"negative_slope={negative_slope} must be a negative power of two "

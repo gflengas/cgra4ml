@@ -124,3 +124,59 @@ def test_hardware_bitwidth_mismatch_raises(tmp_path):
 
     with pytest.raises(AssertionError, match="X_BITS"):
         check_hardware(model, hw)
+
+
+def test_hardware_weight_bits_mismatch_raises(tmp_path):
+    # adapter.py's build_bundles labels every weight tensor with bits=hw.K_BITS
+    # regardless of the JSON's real weight bit-width, so a mismatch here is
+    # silent unless check_hardware catches it explicitly.
+    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.xor import XOR, load
+
+    net = XOR()
+    net = load(net, path=MODEL_PATH)
+    qm = quantized_model(net, layer_bits={
+        'hidden_1': {'weight_bits': 4, 'bias_bits': 16},
+        'hidden_2': {'weight_bits': 8, 'bias_bits': 16},
+        'out': {'weight_bits': 8, 'bias_bits': 16},
+    })
+    qm.quantization(X)
+    json_path = str(tmp_path / "xor_graph.json")
+    qm.export_graph_json(X, json_path)
+
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / "vectors"))
+    model.forward(model.quantize_input(X[:1]))
+
+    with pytest.raises(AssertionError, match="K_BITS"):
+        check_hardware(model, hw)
+
+
+def test_hardware_bias_bits_exceeding_b_bits_raises(tmp_path):
+    # Failure scenario from the review: layer_bits sets bias_bits=32 while
+    # Hardware only configures bits_bias=16 - xmodel.py's b.be.astype(np.int16)
+    # would silently wrap those bias values into wb.bin without this check.
+    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.xor import XOR, load
+
+    net = XOR()
+    net = load(net, path=MODEL_PATH)
+    qm = quantized_model(net, layer_bits={
+        'hidden_1': {'weight_bits': 8, 'bias_bits': 32},
+        'hidden_2': {'weight_bits': 8, 'bias_bits': 16},
+        'out': {'weight_bits': 8, 'bias_bits': 16},
+    })
+    qm.quantization(X)
+    json_path = str(tmp_path / "xor_graph.json")
+    qm.export_graph_json(X, json_path)
+
+    model = FixedPointModel(json_path)
+    model.load_int_weights(json_path)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / "vectors"))
+    model.forward(model.quantize_input(X[:1]))
+
+    with pytest.raises(AssertionError, match="B_BITS"):
+        check_hardware(model, hw)

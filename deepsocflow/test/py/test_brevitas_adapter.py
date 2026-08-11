@@ -26,6 +26,17 @@ def test_act_params_rejects_non_power_of_two_slope():
         act_params('leaky_relu', negative_slope=0.1)
 
 
+def test_act_params_rejects_default_slope_with_legible_message():
+    # negative_slope defaults to 0.0, which used to reach math.log2(0.0) and
+    # raise "ValueError: math domain error" before the power-of-two assertion
+    # could produce its message (legacy's np.log2 degrades to -inf instead and
+    # lets the assert fire cleanly). This is the only power-of-two enforcement
+    # in the pipeline, so calling act_params('leaky_relu') with no slope must
+    # raise the same legible AssertionError, not a ValueError.
+    with pytest.raises(AssertionError, match="power of two"):
+        act_params('leaky_relu')
+
+
 def test_act_params_rejects_unsupported_activation():
     with pytest.raises(NotImplementedError, match="silu"):
         act_params('silu')

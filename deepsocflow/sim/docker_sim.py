@@ -49,6 +49,19 @@ def main():
     from deepsocflow.py.hardware import Hardware
     Hardware.simulate = _docker_simulate
 
+    # The brevitas backend has its own, separate, non-inheriting Hardware class
+    # (deepsocflow/py/brevitas/hardware.py) - kept separate on purpose so that
+    # backend doesn't pull in the legacy TensorFlow/qkeras stack just by
+    # importing Hardware. Patch it too, explicitly and unconditionally, rather
+    # than leaving it to a guard in the target script that can never actually
+    # tell whether this bridging is needed: importing deepsocflow.py.brevitas.
+    # export already imports deepsocflow.py.hardware (and therefore
+    # tensorflow) transitively via deepsocflow/__init__.py, so any such guard
+    # in the target script would always fire and its "only under docker_sim.py"
+    # framing would be false.
+    from deepsocflow.py.brevitas.hardware import Hardware as BrevitasHardware
+    BrevitasHardware.simulate = _docker_simulate
+
     sys.argv = sys.argv[1:]
     os.chdir(os.path.dirname(target))
     runpy.run_path(target, run_name="__main__")

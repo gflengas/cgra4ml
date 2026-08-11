@@ -72,6 +72,7 @@ class FixedPointModel:
 
             bias_cfg = cfg.get('bias')
             bias_frac = bias_cfg['frac'] if bias_cfg is not None else cfg['input_frac'] + cfg['weight']['frac']
+            bias_bits = bias_cfg['bits'] if bias_cfg is not None else None
 
             act_signed = cfg.get('act_signed')
             if act_signed is None:
@@ -92,7 +93,9 @@ class FixedPointModel:
                 input_bits=cfg['input_bits'],
                 input_frac=cfg['input_frac'],
                 input_signed=input_signed,
+                weight_bits=cfg['weight']['bits'],
                 weight_frac=cfg['weight']['frac'],
+                bias_bits=bias_bits,
                 bias_frac=bias_frac,
                 activation=cfg['activation'],
                 act_bits=cfg['act_bits'],

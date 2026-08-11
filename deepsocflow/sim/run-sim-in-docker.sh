@@ -1,6 +1,12 @@
 #!/bin/bash
-# Builds and runs the deepsocflow verilator testbench inside the pinned-Verilator
-# container, mirroring hardware.py::simulate()'s verilator invocation exactly.
+# Builds the sim image if missing, then builds and runs the deepsocflow
+# verilator testbench inside it (the pinned-Verilator container). The
+# verilator invocation below mirrors hardware.py::simulate()'s verilator
+# invocation (deepsocflow/py/hardware.py:232-257 and its brevitas-backend
+# counterpart, deepsocflow/py/brevitas/hardware.py) by hand - it is NOT
+# generated from that code, so if either of those argv lists changes, update
+# this one to match. Not refactored into one shared place - out of scope for
+# this fix wave.
 #
 # Why the worktree is mounted at its own absolute path rather than /work:
 # hw.export() writes sources.txt with absolute HOST paths
@@ -15,6 +21,14 @@ set -euo pipefail
 W="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 RUN_DIR="${1:-run}"
 IMAGE=deepsocflow-sim:v5.024
+
+# Build the image if it doesn't exist yet. A fresh checkout has no image and
+# no registry to pull one from - explicitly:
+#   docker build -t deepsocflow-sim:v5.024 -f deepsocflow/sim/Dockerfile.sim deepsocflow/sim
+if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
+  echo "=== Image '$IMAGE' not found locally, building it (this takes a few minutes) ==="
+  docker build -t "$IMAGE" -f "$W/deepsocflow/sim/Dockerfile.sim" "$W/deepsocflow/sim"
+fi
 
 docker run --rm -v "$W:$W" -w "$W/$RUN_DIR" "$IMAGE" bash -c "
 set -euo pipefail

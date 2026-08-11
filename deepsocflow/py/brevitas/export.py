@@ -8,12 +8,23 @@ def clog2(x):
 
 
 def check_hardware(model, hw):
-    """Asserts every bundle's tensors FIT the hardware's configured bit-widths
-    (<=, not ==): a bundle can legitimately declare fewer bits than hw.X_BITS
-    (e.g. a ReLU activation narrowed to bits-1 so its non-negative output still
-    fits the signed datapath - see ptq.py's _quantize_activation) without that
-    being a hardware mismatch. Mirrors deepsocflow/py/xmodel.py:55-57 and
-    xbundle.py:148-161. Must be called after model.forward() has populated
+    """Asserts every bundle's tensors FIT the hardware's configured bit-widths.
+    input_bits/act_bits use <=, not ==: a bundle can legitimately declare fewer
+    bits than hw.X_BITS (e.g. a ReLU activation narrowed to bits-1 so its
+    non-negative output still fits the signed datapath - see ptq.py's
+    _quantize_activation) without that being a hardware mismatch.
+    weight.bits/bias.bits validate against hw.K_BITS/hw.B_BITS too:
+    adapter.py's build_bundles labels every weight/bias tensor with
+    bits=hw.K_BITS/hw.B_BITS regardless of the JSON's real bit-width (it has
+    no other source for the hardware's configured width), so a mismatch there
+    doesn't raise on its own - it silently mislabels or truncates the legacy
+    XTensor/export path's engine-layout `.bin` blobs. weight.bits must equal
+    hw.K_BITS (weight bit-width is a single hardware-wide packing width, not
+    per-layer - mirrors deepsocflow/py/xmodel.py:56's `hw.K_BITS ==
+    sys_bits.k`); bias.bits only needs to fit within hw.B_BITS (mirrors
+    xmodel.py:57's `hw.B_BITS >= sys_bits.b`) since bias storage just needs
+    enough headroom, not an exact width. Mirrors deepsocflow/py/xmodel.py:55-57
+    and xbundle.py:148-161. Must be called after model.forward() has populated
     model.trace, since the activation-range check inspects real computed
     values, not just declared bits."""
     for name in model.bundle_order:
@@ -23,6 +34,11 @@ def check_hardware(model, hw):
             f"bundle '{name}': input_bits={bundle['input_bits']} > hw.X_BITS={hw.X_BITS}")
         assert bundle['act_bits'] <= hw.X_BITS, (
             f"bundle '{name}': act_bits={bundle['act_bits']} > hw.X_BITS={hw.X_BITS}")
+        assert bundle['weight_bits'] == hw.K_BITS, (
+            f"bundle '{name}': weight.bits={bundle['weight_bits']} != hw.K_BITS={hw.K_BITS}")
+        if bundle['bias_bits'] is not None:
+            assert bundle['bias_bits'] <= hw.B_BITS, (
+                f"bundle '{name}': bias.bits={bundle['bias_bits']} > hw.B_BITS={hw.B_BITS}")
 
         # ACC_WIDTH bound - Phase 1 uses the bundle's real in_features (CI) as the
         # channel count, unlike the legacy backend's RAM_WEIGHTS_DEPTH-derived r.CM

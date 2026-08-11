@@ -1,6 +1,5 @@
 import os
 
-from deepsocflow.py.brevitas.export import export_inference
 from deepsocflow.py.brevitas.hardware import Hardware
 from deepsocflow.py.brevitas.sim import FixedPointModel
 from deepsocflow.py.brevitas.xor import X, Y
@@ -31,8 +30,16 @@ if __name__ == '__main__':
     print("Model graph:")
     model.print_graph()
 
-    # 3. export the golden-reference files a future RTL step will diff against
-    #    (batch_size=1 - matches the legacy dense convention, run/param_test.py)
+    # 3. export the engine-layout files (.txt/.bin, config_fw.h) the RTL
+    #    testbench consumes, using all four XOR rows. This is the only export
+    #    call in this script - export_rtl's underlying _export_bundles already
+    #    writes the layout-independent golden-reference files (y_exp.txt,
+    #    {ib}_y_nhwc_exp.txt) as part of the same pass (xmodel.py:319-334), so
+    #    a separate export_inference call here would just get its own output
+    #    to that same DATA_DIR deleted and overwritten by this one - dead work
+    #    with a misleading print. export_inference itself is still exported
+    #    and tested (deepsocflow/py/brevitas/export.py) for callers that only
+    #    want the golden reference without the engine-layout files.
     # data_dir must be relative to the CURRENT WORKING DIRECTORY, not just to
     # this file: the legacy xmodel.py writes config_fw.h's DATA_DIR macro as
     # a literal f'"../{hw.DATA_DIR}"' (xmodel.py:268), assuming hw.DATA_DIR is
@@ -63,40 +70,26 @@ if __name__ == '__main__':
         axi_width=128,
         data_dir=os.path.relpath(os.path.join(os.path.dirname(__file__), 'vectors')))
 
-    print()
-    result = export_inference(model, hw, X, batch_size=1)
-    print(f"Exported golden-reference files: {result['files']}")
-
-    # 4. export the engine-layout files (.txt/.bin, config_fw.h) the RTL
-    #    testbench consumes, using all four XOR rows.
     from deepsocflow.py.brevitas.export import export_rtl
 
     print()
     rtl_result = export_rtl(model, hw, X, batch_size=4)
     print(f"Exported {len(rtl_result['files'])} RTL files to {hw.DATA_DIR}")
 
-    # 5. run the RTL simulation and verify it against the golden reference.
+    # 4. run the RTL simulation and verify it against the golden reference.
     #    verify_inference reads only the legacy BUNDLES global (already
     #    populated by export_rtl above) and hw - its `model` argument is
     #    unused, so we pass None.
     from deepsocflow.py.xmodel import verify_inference
 
-    # docker_sim.py (used to route hw.simulate() into the pinned-Verilator
-    # container, since neither Verilator available on this host can build/run
-    # this design - see that script's docstring) monkeypatches
-    # deepsocflow.py.hardware.Hardware.simulate - a *different*, non-inheriting
-    # class from this backend's own deepsocflow.py.brevitas.hardware.Hardware
-    # (kept separate on purpose so this backend doesn't pull in the legacy
-    # TensorFlow/qkeras stack - see hardware.py's module docstring). Adopt that
-    # patched simulate() only if the legacy module is already imported (i.e.
-    # only when actually running under docker_sim.py, which imports it before
-    # this script runs) - a plain `python -m deepsocflow.py.brevitas.main`
-    # never imports it, so this is a no-op there and TF/qkeras stay unimported.
-    import sys
-    _legacy_hardware_module = sys.modules.get('deepsocflow.py.hardware')
-    if _legacy_hardware_module is not None:
-        Hardware.simulate = _legacy_hardware_module.Hardware.simulate
-
+    # hw.simulate() runs as-is here: under plain `python -m
+    # deepsocflow.py.brevitas.main` it's this backend's own Hardware.simulate
+    # (deepsocflow/py/brevitas/hardware.py). Under docker_sim.py - the only way
+    # to actually simulate on this host, since neither locally available
+    # Verilator can build/run this design (see that script's docstring) -
+    # docker_sim.py itself monkeypatches both this class and the legacy
+    # deepsocflow.py.hardware.Hardware.simulate before this script runs, so
+    # there is nothing for main.py to bridge here.
     print()
     hw.export_json()
     hw.export()  # config_hw.svh, config_hw.tcl, sources.txt
