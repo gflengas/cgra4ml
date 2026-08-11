@@ -1,3 +1,5 @@
+import re
+
 import numpy as np
 import pytest
 
@@ -279,3 +281,47 @@ def test_full_legacy_export_path_runs_on_adapted_bundles(tmp_path, monkeypatch):
 
     assert (tmp_path / "config_fw.h").exists(), "config_fw.h was not written"
     assert any(data_dir.iterdir()), "no engine-layout files were written"
+
+
+def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
+    """xmodel.py:233 emits these with `is not None`, and legacy stores None when
+    absent (xbundle.py:41,44). Storing False instead makes every bundle claim to
+    be flattened and softmaxed. Asserting on the emitted text rather than on the
+    attributes is deliberate: that is the level this bug is visible at."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.xmodel import _export_bundles
+
+    data_dir = tmp_path / 'vectors'
+    data_dir.mkdir(parents=True, exist_ok=True)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(data_dir))
+    build_bundles(_two_bundle_model(tmp_path), hw)
+
+    monkeypatch.chdir(tmp_path)
+    _export_bundles(hw, None)
+
+    text = (tmp_path / "config_fw.h").read_text()
+    flatten_flags = [int(v) for v in re.findall(r"\.is_flatten=\s*(\d+)", text)]
+    softmax_flags = [int(v) for v in re.findall(r"\.is_softmax=\s*(\d+)", text)]
+
+    assert flatten_flags == [0, 0], "no bundle in this fixture is flattened"
+    assert softmax_flags == [0, 1], "only the last bundle carries softmax"
+
+
+def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
+    """Legacy stores None; xmodel.py:233 tests `is not None` while xbundle.py:144
+    tests truthiness, so absent must be None and present must be truthy."""
+    pytest.importorskip("tensorflow")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
+    bundles = build_bundles(_two_bundle_model(tmp_path), hw)
+
+    for b in bundles:
+        assert b.flatten is None
+    assert bundles[0].softmax is None
+    assert bundles[1].softmax

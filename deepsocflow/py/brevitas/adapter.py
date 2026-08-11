@@ -86,8 +86,12 @@ class BrevitasBundle:
         self.core = core
         self.pool = None
         self.add = None
-        self.flatten = False
-        self.softmax = softmax
+        # None-vs-truthy matters: xmodel.py:233 emits is_flatten/is_softmax with
+        # `is not None`, while xbundle.py:144 and xmodel.py:221 test truthiness.
+        # Legacy stores None when absent (xbundle.py:41,44), so `False` here would
+        # make every bundle claim to be flattened and softmaxed.
+        self.flatten = None
+        self.softmax = True if softmax else None
         self.out = out
         self.pre_softmax = pre_softmax
         self.prev_ib = prev_ib
