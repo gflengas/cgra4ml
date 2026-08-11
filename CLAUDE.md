@@ -1,7 +1,8 @@
 # Working Agreement
 
 - Work has moved through several branches (`brevitas-qonnx-backend` → `brevitas-golden-ref` → `brevitas-rtl-e2e`), so there's no single fixed branch name to enforce here anymore — work on whichever branch the active task/plan names (check `docs/superpowers/plans/` or `.superpowers/sdd/` for the current one).
-- Do not `git commit` or `git push` anything unless a plan/task explicitly authorizes it — otherwise the user handles commits and pushes themselves.
+- Do not `git commit` or `git push` anything — the user handles commits and pushes themselves.
+  - (During the 2026-08-11 RTL end-to-end work the user granted a one-off exception for that plan's branch, `brevitas-rtl-e2e`, allowing subagents to commit locally but never push. That was per-plan permission given in-session, not a standing change to this rule — ask again next time.)
 
 # Known Issues
 
