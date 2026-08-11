@@ -91,6 +91,19 @@ def _quantize_activation(act):
 	# Activations: plain torch type -> (our xlayer quant equivalent, power-of-two scale
 	# act_quant matching its sign - Uint8 for ReLU/Sigmoid outputs, which are >= 0,
 	# Int8 for everything else).
+	if isinstance(act, nn.LeakyReLU):
+		# quant_lrelu (deepsocflow/c/runtime.h:153) implements the negative-side
+		# scaling as a pure left-shift, so it can only realize slopes that are
+		# exact negative powers of two - mirrors xlayers.py:23's assert. Without
+		# this check a non-power-of-two slope trains and calibrates fine but
+		# produces a model with no valid quant_lrelu parameterization, and the
+		# failure would only surface much later at RTL-adapter time.
+		slope = act.negative_slope
+		log_slope = math.log2(slope) if slope > 0 else float("-inf")
+		assert slope > 0 and int(log_slope) == log_slope and log_slope <= 0, (
+			f"negative_slope={slope} of LeakyReLU must be a negative power of two "
+			f"(0.5, 0.25, 0.125, ...) - quant_lrelu implements it as a shift")
+
 	ACT_MAP = {
 		nn.ReLU: (QuantReLU, Uint8ActPerTensorFixedPoint),
 		nn.Sigmoid: (QuantSigmoid, Uint8ActPerTensorFixedPoint),
