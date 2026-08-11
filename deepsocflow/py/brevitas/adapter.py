@@ -45,7 +45,8 @@ def to_legacy_dense_weight(weight_int):
     return np.asarray(weight_int).T
 
 
-from deepsocflow.py.utils import BUNDLES, XTensor
+from deepsocflow.py.numeric import BUNDLES
+from deepsocflow.py.brevitas.xtensor import XTensor
 
 
 class _Act:
@@ -115,8 +116,8 @@ class BrevitasBundle:
         return self.out
 
     def export(self, hw, is_last):
-        from deepsocflow.py.xbundle import XBundle
-        return XBundle.export(self, hw, is_last)
+        from deepsocflow.py.brevitas.rtl_export import export_bundle
+        return export_bundle(self, hw, is_last)
 
 
 def build_bundles(model, hw, has_bias=None):

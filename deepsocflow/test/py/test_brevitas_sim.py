@@ -40,8 +40,7 @@ def _write_graph(tmp_path, layers, name="graph.json"):
 
 
 def test_shift_round_matches_legacy():
-    pytest.importorskip("tensorflow")
-    from deepsocflow.py.utils import shift_round as legacy_shift_round
+    from deepsocflow.py.numeric import shift_round as legacy_shift_round
 
     rng = np.random.default_rng(0)
     n = rng.integers(-100000, 100000, size=2000, dtype=np.int64)

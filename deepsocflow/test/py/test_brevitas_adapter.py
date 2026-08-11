@@ -93,7 +93,6 @@ def _two_bundle_model(tmp_path):
 
 
 def test_build_bundles_sets_chain_topology(tmp_path):
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -109,8 +108,7 @@ def test_build_bundles_sets_chain_topology(tmp_path):
 
 
 def test_build_bundles_registers_into_legacy_bundles_global(tmp_path):
-    pytest.importorskip("tensorflow")
-    from deepsocflow.py.utils import BUNDLES
+    from deepsocflow.py.numeric import BUNDLES
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -125,7 +123,6 @@ def test_build_bundles_registers_into_legacy_bundles_global(tmp_path):
 
 
 def test_build_bundles_shift_bits_matches_sim(tmp_path):
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -141,7 +138,6 @@ def test_build_bundles_shift_bits_matches_sim(tmp_path):
 
 
 def test_call_int_is_a_noop(tmp_path):
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -149,15 +145,14 @@ def test_call_int_is_a_noop(tmp_path):
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
     bundles = build_bundles(_two_bundle_model(tmp_path), hw)
 
-    before = bundles[0].core.y.itensor.numpy().copy()
+    before = bundles[0].core.y.itensor.copy()
     bundles[0].call_int(None, hw)
-    assert np.array_equal(bundles[0].core.y.itensor.numpy(), before)
+    assert np.array_equal(bundles[0].core.y.itensor, before)
 
 
 def test_bias_none_when_absent(tmp_path):
     """legacy xbundle.py:135,167 tests `if self.core.b` truthiness - an absent
     bias must be None, never an empty/zero array."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -198,7 +193,6 @@ def test_to_legacy_dense_weight_transposes_to_in_out():
 def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
     """xbundle.py:139 does `CI,CO = core.w.itensor.shape` — a 4-D tensor here
     raises 'too many values to unpack'."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -217,7 +211,6 @@ def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
 def test_core_exposes_bias_shifts(tmp_path):
     """xmodel.py:234's config_fw.h writer reads these. Legacy computes them in
     XDense.call_int, which the adapter's no-op call_int never runs."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -233,7 +226,6 @@ def test_core_exposes_bias_shifts(tmp_path):
 def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
     """The gap that let both defects through: no Task 6 test called .export().
     This drives the real legacy reorder path end to end."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -254,7 +246,6 @@ def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
 def test_softmax_fields_default_to_zero_and_are_set_on_the_softmax_bundle(tmp_path):
     """xmodel.py:234 reads b.softmax_frac and b.softmax_max_i. Legacy defaults
     both to 0 (xbundle.py:47-48) and overrides them only on a softmax bundle."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 
@@ -276,10 +267,9 @@ def test_full_legacy_export_path_runs_on_adapted_bundles(tmp_path, monkeypatch):
     one that writes config_fw.h. .export() alone is only half the path: every
     defect so far has been an attribute legacy sets inside call_int, which the
     adapter no-ops, and several are read only by the config_fw.h writer."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
-    from deepsocflow.py.xmodel import _export_bundles
+    from deepsocflow.py.brevitas.rtl_export import _export_bundles
 
     data_dir = tmp_path / 'vectors'
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -299,10 +289,9 @@ def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
     absent (xbundle.py:41,44). Storing False instead makes every bundle claim to
     be flattened and softmaxed. Asserting on the emitted text rather than on the
     attributes is deliberate: that is the level this bug is visible at."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
-    from deepsocflow.py.xmodel import _export_bundles
+    from deepsocflow.py.brevitas.rtl_export import _export_bundles
 
     data_dir = tmp_path / 'vectors'
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -324,7 +313,6 @@ def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
 def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
     """Legacy stores None; xmodel.py:233 tests `is not None` while xbundle.py:144
     tests truthiness, so absent must be None and present must be truthy."""
-    pytest.importorskip("tensorflow")
     from deepsocflow.py.brevitas.adapter import build_bundles
     from deepsocflow.py.brevitas.hardware import Hardware
 

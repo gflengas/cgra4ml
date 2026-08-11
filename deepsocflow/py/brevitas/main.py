@@ -80,7 +80,7 @@ if __name__ == '__main__':
     #    verify_inference reads only the legacy BUNDLES global (already
     #    populated by export_rtl above) and hw - its `model` argument is
     #    unused, so we pass None.
-    from deepsocflow.py.xmodel import verify_inference
+    from deepsocflow.py.brevitas.rtl_export import verify_inference
 
     # hw.simulate() runs as-is here: under plain `python -m
     # deepsocflow.py.brevitas.main` it's this backend's own Hardware.simulate

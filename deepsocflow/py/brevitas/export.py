@@ -146,7 +146,7 @@ def export_rtl(model, hw, x_float, batch_size=4):
     exporter (xmodel.py), not into hw.DATA_DIR - run this from the directory
     where the firmware build expects it."""
     from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.xmodel import _export_bundles
+    from deepsocflow.py.brevitas.rtl_export import _export_bundles
 
     x_int = model.quantize_input(np.asarray(x_float)[:batch_size])
     model.forward(x_int)

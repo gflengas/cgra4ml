@@ -1,7 +1,7 @@
 import numpy as np
 from collections import namedtuple
 
-from deepsocflow.py.utils import *
+from deepsocflow.py.numeric import *
 
 def get_runtime_params(hw, w_shape, x_shape, o_shape, core, pool, flatten):
     # KH/KW: kernel height/width, CI/CO: input/output channels

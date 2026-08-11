@@ -1,19 +1,15 @@
-import tensorflow as tf
-from tensorflow import keras
-from qkeras import *
+"""Numpy-only port of deepsocflow/py/utils.py::XTensor, for the brevitas
+export path (deepsocflow/py/brevitas/rtl_export.py). Same fixed-point
+bookkeeping and math as the original - the only difference is that ftensor/
+itensor hold numpy arrays instead of tf.Tensor, so this file needs no
+tensorflow import at all.
+
+deepsocflow/py/utils.py::XTensor stays exactly as it was for the legacy
+qkeras backend; this is a separate, independent copy, not a subclass."""
 import numpy as np
 
-from deepsocflow.py.numeric import BUNDLES, shift_round, div_round, get_int_bits, get_frac_bits, clog2
+from deepsocflow.py.numeric import get_int_bits, get_frac_bits
 
-@keras.saving.register_keras_serializable()
-class SYS_BITS:
-    '''System-wide bitwidths: x=activations, k=kernel/weights, b=bias'''
-    def __init__(self, x, k, b):
-        self.x = x  # activation (input/output tensor) bitwidth
-        self.k = k  # kernel (weight) bitwidth
-        self.b = b  # bias bitwidth
-    def get_config(self):
-        return {'x': self.x, 'k': self.k, 'b': self.b}
 
 class XTensor:
     '''Wraps a tensor with fixed-point quantization info, keeping both float (ftensor) and integer (itensor) views in sync'''
@@ -26,7 +22,7 @@ class XTensor:
             self.frac = get_frac_bits(bits, int) if frac is None else frac  # number of fractional bits
             self.int = get_int_bits(bits, frac) if int is None else int    # number of integer bits
 
-        tensor = tf.convert_to_tensor(tensor, dtype=tf.float32) if isinstance(tensor, np.ndarray) else tensor
+        tensor = np.asarray(tensor, dtype=np.float32) if tensor is not None else tensor
 
         if from_int:
             self._itensor = tensor
@@ -46,10 +42,9 @@ class XTensor:
         else:
             return self.ftensor * 2**self.frac
 
-
     @property
     def valid(self):
-        valid = (self.itensor.numpy() == self.itensor.numpy().astype(int)).all()
+        valid = (self.itensor == self.itensor.astype(int)).all()
 
         if self.float_only:
             self.error = "Float only"
@@ -59,7 +54,7 @@ class XTensor:
             return False
         else:
             return True
-        
+
     def assert_valid(self):
         assert self.valid, self.error
 
@@ -79,8 +74,3 @@ class XTensor:
         r = (self.itensor * 2**s_shift) + (other.itensor * 2**t_shift)
         r_tensor = XTensor(tensor=r, bits=r_bits, frac=r_frac, from_int=True)
         return r_tensor, (s_shift, t_shift)
-
-
-
-
-
