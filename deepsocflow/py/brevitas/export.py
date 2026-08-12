@@ -49,6 +49,29 @@ def check_hardware(model, hw):
         assert acc_width <= hw.Y_BITS, (
             f"bundle '{name}': ACC_WIDTH={acc_width} > hw.Y_BITS={hw.Y_BITS}")
 
+        # LUT activations (deepsocflow/py/brevitas/lut.py). Same reasoning as the
+        # weight/bias checks above: adapter.py hands the table to the legacy
+        # exporter, which packs its entries as activation words - so a table whose
+        # output is wider than the hardware's activation width silently truncates
+        # in the .bin blob instead of raising.
+        lut = bundle.get('lut')
+        if lut is not None:
+            assert lut.out_bits <= hw.X_BITS, (
+                f"bundle '{name}': LUT out_bits={lut.out_bits} > hw.X_BITS={hw.X_BITS} "
+                f"- table entries are stored as packed activation words")
+            # A wider index is not a hardware limit but a sanity bound: 2**16
+            # entries is 64 KB per activation, far past anything intended to ship,
+            # and almost certainly means act_input_bits was set wrong.
+            assert lut.in_bits <= 16, (
+                f"bundle '{name}': LUT in_bits={lut.in_bits} needs a "
+                f"{2 ** lut.in_bits} entry table ({lut.nbytes} B) - check act_input_bits")
+            # Raised inside ActLut too, but repeated here so the failure names the
+            # bundle rather than just the fracs.
+            acc_frac = bundle['input_frac'] + bundle['weight_frac']
+            assert acc_frac >= lut.in_frac, (
+                f"bundle '{name}': acc_frac={acc_frac} < LUT in_frac={lut.in_frac} "
+                f"- the index rescale must be a right shift, never a multiply")
+
         if name in getattr(model, 'trace', {}):
             out = model.trace[name]['out']
             if bundle['act_signed']:

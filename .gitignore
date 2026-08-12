@@ -28,6 +28,8 @@ run/reference_qkeras_xor/
 # docker_sim.py (deepsocflow/sim/docker_sim.py) chdirs into the target
 # script's own directory before running it, so these land here rather than
 # at the worktree root.
+deepsocflow/py/brevitas/letter-recognition.data
+deepsocflow/py/brevitas/airfoil_self_noise.dat
 deepsocflow/py/brevitas/config_fw.h
 deepsocflow/py/brevitas/config_hw.svh
 deepsocflow/py/brevitas/config_hw.tcl

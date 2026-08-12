@@ -324,3 +324,52 @@ def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
         assert b.flatten is None
     assert bundles[0].softmax is None
     assert bundles[1].softmax
+
+
+# ---- LUT activations ----
+
+def test_lut_bundle_shifts_onto_the_index_grid_not_the_output_grid(tmp_path):
+    """The one attribute whose meaning changes on a LUT bundle. Under variant 1b
+    the index grid and output grid differ, so computing shift_bits against
+    act_frac would still run and still look plausible while indexing the table at
+    the wrong scale."""
+    pytest.importorskip("torch")
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    import deepsocflow.test.py.test_brevitas_lut_1b as h
+
+    _, model = h._run(act_input_bits=8, tmp_path=tmp_path)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, axi_width=128)
+    bundles = build_bundles(model, hw)
+
+    checked = 0
+    for name, b in zip(model.bundle_order, bundles):
+        cfg = model.bundles[name]
+        lut = cfg['lut']
+        if lut is None:
+            continue
+        acc_frac = cfg['input_frac'] + cfg['weight_frac']
+        assert b.core.act.lut is lut
+        assert b.core.act.shift_bits == acc_frac - lut.in_frac
+        checked += 1
+    assert checked, "no LUT bundles were built - the test would be vacuous"
+
+
+def test_non_lut_bundle_keeps_the_original_shift(tmp_path):
+    pytest.importorskip("torch")
+    import torch.nn as nn
+    from deepsocflow.py.brevitas.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware import Hardware
+    import deepsocflow.test.py.test_brevitas_lut_1b as h
+
+    _, model = h._run(act_input_bits=None, tmp_path=tmp_path, activation=nn.ReLU)
+    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
+                  bits_bias=16, bits_sum=32, axi_width=128)
+    bundles = build_bundles(model, hw)
+
+    for name, b in zip(model.bundle_order, bundles):
+        cfg = model.bundles[name]
+        assert b.core.act.lut is None
+        acc_frac = cfg['input_frac'] + cfg['weight_frac']
+        assert b.core.act.shift_bits == b.core.act.plog_slope + acc_frac - cfg['act_frac']

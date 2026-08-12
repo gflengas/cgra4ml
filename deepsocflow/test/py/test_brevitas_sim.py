@@ -178,15 +178,66 @@ def test_softmax_output_matches_manual_softmax(tmp_path):
 
 
 def test_unsupported_activation_raises(tmp_path):
+    # 'mish' is in neither SUPPORTED_ACTIVATIONS (shift+clip) nor
+    # CURVED_ACTIVATIONS (value LUT) - there is no float reference for it in
+    # lut.py::ACT_FUNCS, so it cannot be tabulated either.
     layers = {
         "bundle0": _bundle(input_frac=7, input_bits=8,
                             weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
                             bias_values=[0], bias_frac=13, bias_bits=16,
-                            activation="silu", act_bits=8, act_frac=6),
+                            activation="mish", act_bits=8, act_frac=6),
     }
     json_path = _write_graph(tmp_path, layers)
-    with pytest.raises(ValueError, match="silu"):
+    with pytest.raises(ValueError, match="mish"):
         FixedPointModel(json_path)
+
+
+def test_curved_activation_builds_a_lut(tmp_path):
+    # silu used to raise here. It now builds a table instead - this is the whole
+    # point of the LUT path, so the flip is asserted directly rather than only
+    # implied by the absence of a raise.
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="silu", act_bits=8, act_frac=4),
+    }
+    model = FixedPointModel(_write_graph(tmp_path, layers))
+    lut = model.bundles["bundle0"]["lut"]
+    assert lut is not None
+    # variant 1a: with no lut_grid override the index grid is the output grid
+    assert (lut.in_bits, lut.in_frac) == (8, 4)
+    assert lut.table.shape == (256,)
+
+
+def test_lut_grid_overrides_the_1a_default(tmp_path):
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="tanh", act_bits=8, act_frac=7),
+    }
+    json_path = _write_graph(tmp_path, layers)
+    model = FixedPointModel(json_path, lut_grid={"bundle0": (10, 6)})
+    lut = model.bundles["bundle0"]["lut"]
+    assert (lut.in_bits, lut.in_frac) == (10, 6)
+    assert lut.table.shape == (1024,)
+    # output grid is untouched by the override - it belongs to the model, not the table
+    assert (lut.out_bits, lut.out_frac) == (8, 7)
+
+
+def test_relu_bundle_gets_no_lut(tmp_path):
+    # relu/identity must stay on the shift+clip path: a table for them would be
+    # pure waste, and silently routing them through one would hide regressions
+    # in quant_lrelu parity.
+    layers = {
+        "bundle0": _bundle(input_frac=7, input_bits=8,
+                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
+                            bias_values=[0], bias_frac=13, bias_bits=16,
+                            activation="relu", act_bits=8, act_frac=6),
+    }
+    model = FixedPointModel(_write_graph(tmp_path, layers))
+    assert model.bundles["bundle0"]["lut"] is None
 
 
 def test_unsupported_layer_type_raises(tmp_path):

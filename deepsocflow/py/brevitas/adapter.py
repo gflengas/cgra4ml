@@ -54,11 +54,15 @@ class _Act:
     path reads are provided - there is no call_int, because the adapter never
     recomputes anything."""
 
-    def __init__(self, non_zero, plog_slope, shift_bits, out):
+    def __init__(self, non_zero, plog_slope, shift_bits, out, lut=None):
         self.non_zero = non_zero
         self.plog_slope = plog_slope
         self.shift_bits = shift_bits
         self.out = out
+        # An ActLut (deepsocflow/py/brevitas/lut.py) for curved activations,
+        # None for the quant_lrelu ones. rtl_export.py reads it to emit the
+        # table and .ca_lut_idx; nothing in the legacy path touches it.
+        self.lut = lut
 
 
 class _Core:
@@ -143,16 +147,36 @@ def build_bundles(model, hw, has_bias=None):
         trace = model.trace[name]
 
         acc_frac = cfg['input_frac'] + cfg['weight_frac']
-        non_zero, plog_slope = act_params(cfg['activation'])
+        lut = cfg.get('lut')
 
         act_out = XTensor(
             tensor=np.asarray(trace['out'], dtype=np.float32),
             bits=cfg['act_bits'], frac=cfg['act_frac'], from_int=True)
+
+        if lut is not None:
+            # shift_bits changes MEANING on a LUT bundle. On the quant_lrelu path
+            # it is the shift onto the activation's OUTPUT grid, because that is
+            # where the shift lands the value. On the LUT path the shift lands on
+            # the table's INDEX grid instead, and the output grid is reached by the
+            # table itself - so the target is lut.in_frac, not cfg['act_frac'].
+            #
+            # These coincide only under variant 1a (index grid == output grid), so
+            # using act_frac here would still produce a plausible-looking, running,
+            # wrong result on every 1b model. non_zero/plog_slope are unused on
+            # this path; they are set to the identity values so that a config_fw.h
+            # dump reads as "no lrelu behaviour" rather than as leftovers.
+            non_zero, plog_slope = 1, 0
+            shift_bits = lut.index_shift(acc_frac)
+        else:
+            non_zero, plog_slope = act_params(cfg['activation'])
+            shift_bits = plog_slope + acc_frac - cfg['act_frac']
+
         act = _Act(
             non_zero=non_zero,
             plog_slope=plog_slope,
-            shift_bits=plog_slope + acc_frac - cfg['act_frac'],
-            out=act_out)
+            shift_bits=shift_bits,
+            out=act_out,
+            lut=lut)
 
         w = XTensor(
             tensor=to_legacy_dense_weight(cfg['weight']).astype(np.float32),

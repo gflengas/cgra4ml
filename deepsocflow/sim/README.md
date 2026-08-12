@@ -142,3 +142,49 @@ pre-existing qkeras `run/example.py`, not by anything brevitas-driven. A
 passing brevitas RTL run validates the dense/activation/softmax path on an
 XOR-sized model; it does not validate conv/pooling/residual through the
 brevitas backend.
+
+## If the machine has Vivado, skip all of the above
+
+The Docker/Verilator setup in this directory exists because the *macOS* host it
+was written on could run neither the pinned Verilator 5.024 nor a working newer
+one. On a Linux box with Vivado installed there is a much shorter path: both
+`Hardware` classes already have an `if SIM == 'xsim'` branch, so Vivado's own
+simulator drives the same testbench directly.
+
+```bash
+export PATH=/path/to/Xilinx/Vivado/2023.2/bin:$PATH
+```
+
+```python
+verify_inference(None, hw, SIM='xsim', SIM_PATH='/path/to/Xilinx/Vivado/2023.2/bin/')
+```
+
+Measured on `geonosis` (Vivado 2023.2): a full compile + run of the XOR model
+takes about **6 seconds**, against several minutes for the container route. It
+works for the legacy qkeras scripts too - `run/xor_qkeras.py` and `run/example.py`
+pass unchanged this way, by monkeypatching `deepsocflow.py.hardware.Hardware.simulate`
+to force `SIM='xsim'` the same way `docker_sim.py` forces the container.
+
+## `import torch` failing with `GLIBCXX_3.4.31 not found`
+
+Not a code problem: the system `libstdc++` is older than the conda `torch` build
+expects. Point the loader at conda's own copy first:
+
+```bash
+export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
+```
+
+Without this, roughly ten tests fail on import in a way that reads like a real
+regression but is purely environmental.
+
+## Before running the PYNQ driver harness, restore the committed model
+
+`run/work_pynq/pynq_deploy/test_pynq_driver_xor.py` asserts that a freshly
+regenerated `config.json`/`wbx.bin` matches the deployed copies byte for byte.
+Running `pytest` first breaks that: the suite retrains `xor.py` as a side effect,
+and the retrain is only deterministic *within* one environment - a different torch
+version produces slightly different weights. Restore the committed artifacts first:
+
+```bash
+git checkout -- deepsocflow/py/brevitas/model/
+```

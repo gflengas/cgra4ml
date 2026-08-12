@@ -87,7 +87,15 @@ def _quantize_layer(layer, weight_bits=8, bias_bits=32, own_input_quant=True):
 	return quant_layer
 
 
-def _quantize_activation(act):
+# Activations with no shift-and-clip closed form. On hardware these are executed
+# as a value LUT (deepsocflow/py/brevitas/lut.py), and only these are eligible for
+# the input_quant that variant 1b needs - relu/leaky_relu/identity keep running on
+# quant_lrelu, so giving them an input quantizer would add a quantization point
+# that buys nothing.
+CURVED_ACT_TYPES = (nn.Sigmoid, nn.Tanh, nn.SiLU, nn.SELU, nn.GELU)
+
+
+def _quantize_activation(act, act_input_bits=None):
 	# Activations: plain torch type -> (our xlayer quant equivalent, power-of-two scale
 	# act_quant matching its sign - Uint8 for ReLU/Sigmoid outputs, which are >= 0,
 	# Int8 for everything else).
@@ -132,6 +140,25 @@ def _quantize_activation(act):
 	if act_quant is Uint8ActPerTensorFixedPoint:
 		kwargs["bit_width"] = 7
 
+	# Variant 1b: quantize the activation's INPUT as well as its output.
+	#
+	# Without this, brevitas evaluates the activation on the full-precision
+	# accumulator while the hardware evaluates it on a table indexed by a
+	# shifted-down accumulator - so the two can only agree if the table indexes at
+	# the accumulator's own frac, which measures out at 64-128 KB per activation
+	# (see lut_poc.py's sweep). Adding input_quant makes brevitas round the
+	# accumulator first, exactly as the hardware does, and a 2**act_input_bits
+	# entry table then reproduces it bit-exactly.
+	#
+	# The approximation does not disappear - it moves from "hardware silently
+	# disagrees with the model" to "the model itself is coarser", where
+	# calibration measures it and QAT can train against it. This does add a second
+	# quantization point to the bundle, which the 2026-08-10 single-quantization-
+	# point design deliberately avoided; it is opt-in for that reason.
+	if act_input_bits is not None and isinstance(act, CURVED_ACT_TYPES):
+		kwargs["input_quant"] = Int8ActPerTensorFixedPoint
+		kwargs["input_bit_width"] = act_input_bits
+
 	return quant_cls(**kwargs)
 
 
@@ -162,10 +189,17 @@ class quantized_model(nn.Module):
 	# weight/bias. layer_bits: optional {attr_name: {"weight_bits": N, "bias_bits": N}}
 	# to override the default for specific layers, keyed by the float net's own
 	# attribute name (e.g. {"hidden_1": {"weight_bits": 4}}).
-	def __init__(self, net, weight_bits=8, bias_bits=32, layer_bits=None):
+	#
+	# act_input_bits: None (default) leaves curved activations evaluated on the
+	# full-precision accumulator - the hardware LUT then only approximates them.
+	# Setting it (e.g. 8) quantizes each curved activation's input too, which is
+	# what makes a 2**act_input_bits entry LUT bit-exact. See _quantize_activation.
+	def __init__(self, net, weight_bits=8, bias_bits=32, layer_bits=None,
+	             act_input_bits=None):
 		super().__init__()
 		self.bundles = nn.ModuleList()
 		layer_bits = layer_bits or {}
+		self.act_input_bits = act_input_bits
 
 		named_children = list(net.named_children())
 		children = [child for _, child in named_children]
@@ -184,7 +218,7 @@ class quantized_model(nn.Module):
 					f"expected a compute layer (Linear/ConvNd) at this point in the net")
 			i += 1
 
-			quant_act = _quantize_activation(children[i]) if i < len(children) else None
+			quant_act = _quantize_activation(children[i], act_input_bits) if i < len(children) else None
 			if quant_act is not None:
 				core.act = quant_act
 				i += 1
@@ -305,6 +339,20 @@ class quantized_model(nn.Module):
 					layer["act_scale"] = act_scale
 					layer["act_zero_point"] = core.act.act_quant.zero_point().item()
 					layer["act_signed"] = bool(core.act.act_quant.is_signed)
+
+				# Variant 1b only: the grid the activation's input was quantized
+				# onto. A LUT indexed on exactly this grid reproduces brevitas's
+				# own output bit-exactly, so sim.py sizes the table from these
+				# rather than guessing. Absent for 1a models, where brevitas
+				# evaluated the activation on the raw accumulator.
+				act_in_quant = getattr(core.act, 'input_quant', None)
+				if act_in_quant is not None and act_in_quant.is_quant_enabled:
+					act_in_scale = act_in_quant.scale().item()
+					layer["act_in_bits"] = int(act_in_quant.bit_width().item())
+					layer["act_in_frac"] = _frac_bits(act_in_scale)
+					layer["act_in_scale"] = act_in_scale
+					layer["act_in_signed"] = bool(act_in_quant.is_signed)
+
 				layer["softmax"] = bundle.softmax is not None
 
 				layers[name] = layer

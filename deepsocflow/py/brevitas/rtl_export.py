@@ -222,10 +222,51 @@ def _export_bundles(hw, x):
     # apart - it reads the same locals the ch.write(...) calls below use.
     bundles_json = []
 
+    # Activation LUTs (deepsocflow/py/brevitas/lut.py). Collected before the
+    # bundle loop because the table array has to be emitted ahead of the
+    # Bundle_t initializers that index into it. Identical tables are shared: two
+    # bundles with the same activation on the same grid produce the same bytes,
+    # and duplicating them would waste the config_fw.h space this design is
+    # chosen for. Bundles on the quant_lrelu path get index -1.
+    lut_tables = []          # unique tables, in emission order
+    lut_meta = []            # (in_bits,) per unique table
+    lut_idx_of_ib = {}
+    for b in BUNDLES:
+        lut = getattr(b.core.act, 'lut', None)
+        if lut is None:
+            lut_idx_of_ib[b.ib] = (-1, 0)
+            continue
+        key = (lut.activation, lut.in_bits, lut.in_frac, lut.out_bits, lut.out_frac,
+               lut.out_signed, tuple(int(v) for v in lut.table))
+        for i, (existing_key, _) in enumerate(lut_tables):
+            if existing_key == key:
+                lut_idx_of_ib[b.ib] = (i, lut.in_bits)
+                break
+        else:
+            lut_tables.append((key, lut))
+            lut_meta.append(lut.in_bits)
+            lut_idx_of_ib[b.ib] = (len(lut_tables) - 1, lut.in_bits)
+
+    # Tables of different widths are padded to a common stride so LUTS stays a
+    # plain 2-D array in C. ca_lut_bits tells the firmware how much of each row
+    # is real, so the padding is never addressed.
+    lut_entries = max((2 ** bits for bits in lut_meta), default=0)
+
     x_bytes_all = x_bytes = w_bytes = b_words = x_bytes_max = nhwc_words_max = o_bytes_max = o_words_max = 0
     with open (f'./config_fw.h', 'w') as ch:
 
         ch.write(f"#define N_BUNDLES {len(BUNDLES)}\n")
+        ch.write(f"#define N_LUTS      {len(lut_tables)}\n")
+        ch.write(f"#define LUT_ENTRIES {lut_entries}\n")
+        if lut_tables:
+            ch.write(f"static const i8 LUTS [N_LUTS][LUT_ENTRIES] = {{\n")
+            for _, lut in lut_tables:
+                padded = list(int(v) for v in lut.table) + [0] * (lut_entries - lut.table.size)
+                body = ','.join(f"{v:>4}" for v in padded)
+                ch.write(f"  /* {lut.activation} {lut.in_bits}b/frac{lut.in_frac} -> "
+                         f"{lut.out_bits}b/frac{lut.out_frac} */\n  {{{body}}},\n")
+            ch.write("};\n")
+        ch.write("\n")
         ch.write(f"Bundle_t bundles [N_BUNDLES] = {{\n")
 
         # Naming below: _bpt = bytes per transfer, _b suffix = value for the current bundle,
@@ -275,6 +316,10 @@ def _export_bundles(hw, x):
             y_r_ll = hw.ROWS if b.r.XH==b.r.XL*hw.ROWS else  b.r.XH % hw.ROWS        # row count in the last (ll) row-block
 
             ca_nzero, ca_shift, ca_pl_scale = b.core.act.non_zero, b.core.act.shift_bits, b.core.act.plog_slope  # core (conv/dense) activation params
+            # On a LUT bundle ca_shift lands the accumulator on the TABLE'S INDEX
+            # grid, not on the activation's output grid (adapter.py sets it that
+            # way); ca_nzero/ca_pl_scale are unused there.
+            ca_lut_idx, ca_lut_bits = lut_idx_of_ib[b.ib]
 
             (aa_nzero, aa_shift, aa_pl_scale) = (b.add .act.non_zero, b.add .act.shift_bits, b.add .act.plog_slope)if b.add  is not None else (0,0,0)  # residual-add activation params
             (pa_nzero, pa_shift, pa_pl_scale) = (b.pool.act.non_zero, b.pool.act.shift_bits, b.pool.act.plog_slope)if b.pool is not None else (0,0,0)  # pool activation params
@@ -296,7 +341,7 @@ def _export_bundles(hw, x):
             ch.write(     f".xp_words={xp_words:<6}, .b_offset={b_words:<5}, .w_bpt={w_bpt:<5}, .w_bpt_p0={w_bpt_p0:<5}, .x_bpt={x_bpt:<8}, .x_bpt_p0={x_bpt_p0:<8}, .o_words={o_words_b:<8}, .o_bytes={o_bytes_b:<8}, ")
             ch.write(     f".ib_out={ib_out:<4}, .in_buffer_idx={in_buffer_idx:<3}, .out_buffer_idx={b.out_buffer_idx:<3}, .add_out_buffer_idx={add_out_buffer_idx:<2}, .add_in_buffer_idx={add_in_buffer_idx:<2}, ")
             ch.write(     f".is_bias={1*(b.core.b is not None):<3}, .is_flatten={1*(b.flatten is not None):<3}, .is_softmax={1*(b.softmax is not None):<3}, ")
-            ch.write(     f".x_pad={b.r.X_PAD:<3}, .b_val_shift={b.core.bias_val_shift:<3}, .b_bias_shift={b.core.bias_b_shift:<3}, .ca_nzero={ca_nzero:<3}, .ca_shift={ca_shift:<3}, .ca_pl_scale={ca_pl_scale:<3}, .aa_nzero={aa_nzero:<3}, .aa_shift={aa_shift:<3}, .aa_pl_scale={aa_pl_scale:<3}, .pa_nzero={pa_nzero:<3}, .pa_shift={pa_shift:<3}, .pa_pl_scale={pa_pl_scale:<3}, .softmax_frac={b.softmax_frac:<3}, ")
+            ch.write(     f".x_pad={b.r.X_PAD:<3}, .b_val_shift={b.core.bias_val_shift:<3}, .b_bias_shift={b.core.bias_b_shift:<3}, .ca_nzero={ca_nzero:<3}, .ca_shift={ca_shift:<3}, .ca_pl_scale={ca_pl_scale:<3}, .aa_nzero={aa_nzero:<3}, .aa_shift={aa_shift:<3}, .aa_pl_scale={aa_pl_scale:<3}, .pa_nzero={pa_nzero:<3}, .pa_shift={pa_shift:<3}, .pa_pl_scale={pa_pl_scale:<3}, .ca_lut_idx={ca_lut_idx:<3}, .ca_lut_bits={ca_lut_bits:<3}, .softmax_frac={b.softmax_frac:<3}, ")
             ch.write(     f".csh={b.r.CSH:<3}, .csh_shift={b.r.CSH_SHIFT:<3}, .psh_shift={b.r.PSH_SHIFT:<3}, .csw={b.r.CSW:<3}, .csw_shift={b.r.CSW_SHIFT:<3}, .psw_shift={b.r.PSW_SHIFT:<3}, .pool={pool_type:<10}, ")
             ch.write(     f".softmax_max_i={b.softmax_max_i:<15}, ")
             ch.write(     f".header={b.r.header:>23}u, ")
@@ -324,6 +369,7 @@ def _export_bundles(hw, x):
                 'ca_nzero': int(ca_nzero), 'ca_shift': int(ca_shift), 'ca_pl_scale': int(ca_pl_scale),
                 'aa_nzero': int(aa_nzero), 'aa_shift': int(aa_shift), 'aa_pl_scale': int(aa_pl_scale),
                 'pa_nzero': int(pa_nzero), 'pa_shift': int(pa_shift), 'pa_pl_scale': int(pa_pl_scale),
+                'ca_lut_idx': int(ca_lut_idx), 'ca_lut_bits': int(ca_lut_bits),
                 'softmax_frac': int(b.softmax_frac),
                 'csh': int(b.r.CSH), 'csh_shift': int(b.r.CSH_SHIFT), 'psh_shift': int(b.r.PSH_SHIFT),
                 'csw': int(b.r.CSW), 'csw_shift': int(b.r.CSW_SHIFT), 'psw_shift': int(b.r.PSW_SHIFT),
@@ -368,6 +414,8 @@ def _export_bundles(hw, x):
 
         defines_json = {
             'N_BUNDLES': len(BUNDLES),
+            'N_LUTS': len(lut_tables),
+            'LUT_ENTRIES': lut_entries,
             'X_BITS_L2': int(np.log2(hw.X_BITS)),
             'W_BITS_L2': int(np.log2(hw.K_BITS)),
             'KH_MAX': hw.KH_MAX,
@@ -391,8 +439,21 @@ def _export_bundles(hw, x):
             'CONFIG_BASEADDR': str(hw.CONFIG_BASEADDR),
             'DATA_DIR': hw.DATA_DIR,
         }
+        # 'luts' mirrors config_fw.h's LUTS array exactly - same rows, same
+        # padding, same order - so pynq_driver.py indexes it with the very
+        # ca_lut_idx the firmware uses. Built from the same lut_tables list the
+        # header was written from, for the same no-drift reason as 'bundles'.
+        luts_json = [
+            {'activation': lut.activation,
+             'in_bits': int(lut.in_bits), 'in_frac': int(lut.in_frac),
+             'out_bits': int(lut.out_bits), 'out_frac': int(lut.out_frac),
+             'out_signed': bool(lut.out_signed),
+             'table': [int(v) for v in lut.table] + [0] * (lut_entries - lut.table.size)}
+            for _, lut in lut_tables
+        ]
         with open('./config.json', 'w') as cj:
-            json.dump({'defines': defines_json, 'bundles': bundles_json}, cj, indent=4)
+            json.dump({'defines': defines_json, 'bundles': bundles_json,
+                       'luts': luts_json}, cj, indent=4)
 
         mask_nums = [(2**hw.X_BITS-1) << (p*hw.X_BITS)  for p in range(8//hw.X_BITS)]
         mask_nums = ~np.array(mask_nums, dtype=np.uint8)
