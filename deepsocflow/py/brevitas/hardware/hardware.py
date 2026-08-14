@@ -7,8 +7,10 @@ import time
 
 # deepsocflow package root (parent of py/), computed from this file's own path -
 # NOT `import deepsocflow`, since deepsocflow/__init__.py pulls in the legacy
-# TensorFlow/qkeras stack this backend deliberately avoids.
-_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# TensorFlow/qkeras stack this backend deliberately avoids. One extra dirname()
+# than you'd expect from "parent of py/" because this file lives a level deeper,
+# at deepsocflow/py/brevitas/hardware/hardware.py.
+_PACKAGE_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 
 def clog2(x):

@@ -79,7 +79,7 @@ def load(model, path=MODEL_PATH):
     return model
 
 if __name__ == "__main__":
-    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
 
     torch.manual_seed(DEFAULT_SEED)  # must run before XOR() draws its initial weights
     model = XOR()

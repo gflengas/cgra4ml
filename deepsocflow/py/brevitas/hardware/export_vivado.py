@@ -14,7 +14,7 @@ Usage (on the Vivado machine, from wherever you want the generated files to
 land - a fresh directory is fine, matching this project's `run/work`
 convention):
     mkdir -p vivado_run && cd vivado_run
-    python /path/to/cgra4ml/deepsocflow/py/brevitas/export_vivado.py --board zcu104
+    python /path/to/cgra4ml/deepsocflow/py/brevitas/hardware/export_vivado.py --board zcu104
 
 Then, in that same directory:
     vivado -mode batch -source vivado_flow.tcl
@@ -39,7 +39,7 @@ def main():
                               "deepsocflow/tcl/fpga/<board>.tcl script")
     args = parser.parse_args()
 
-    # Same Hardware config as deepsocflow/py/brevitas/main.py's RTL-sim run -
+    # Same Hardware config as deepsocflow/py/brevitas/hardware/main.py's RTL-sim run -
     # keep these two in sync if that config ever changes, so the bitstream
     # matches what was already verified in simulation.
     hw = Hardware(

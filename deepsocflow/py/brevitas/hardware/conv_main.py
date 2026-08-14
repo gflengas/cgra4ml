@@ -1,6 +1,6 @@
 """Drives one conv bring-up stage (see conv.py) all the way to RTL simulation.
 
-    python deepsocflow/py/brevitas/conv_main.py --stage a --sim xsim
+    python deepsocflow/py/brevitas/hardware/conv_main.py --stage a --sim xsim
 
 Mirrors main.py's structure for the XOR model. The two Hardware settings that
 are load-bearing rather than arbitrary are called out at the constructor.
@@ -11,7 +11,9 @@ import os
 import numpy as np
 import torch
 
-BREV_DIR = os.path.dirname(os.path.abspath(__file__))
+# brevitas package root (parent of hardware/), so vectors_conv_* output lands
+# next to model/ as before the file moved into hardware/.
+BREV_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def main():
@@ -28,9 +30,9 @@ def main():
 
     from deepsocflow.py.brevitas.conv import (
         build_model, stage_data, prime_batchnorm, MODEL_DIR, STAGE_RESIDUALS)
-    from deepsocflow.py.brevitas.hardware import Hardware
-    from deepsocflow.py.brevitas.ptq import quantized_model
-    from deepsocflow.py.brevitas.sim import FixedPointModel
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
+    from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 
     # Input size is per-stage: the strided stage needs an odd one (see conv.py).
     X, _, x_rtl_full = stage_data(args.stage)
@@ -138,8 +140,8 @@ def main():
         valid_prob=1, ready_prob=1,
         data_dir=os.path.relpath(os.path.join(BREV_DIR, f'vectors_conv_{args.stage}')))
 
-    from deepsocflow.py.brevitas.export import export_rtl
-    from deepsocflow.py.brevitas.rtl_export import verify_inference
+    from deepsocflow.py.brevitas.export.export import export_rtl
+    from deepsocflow.py.brevitas.export.rtl_export import verify_inference
 
     result = export_rtl(fp, hw, x_rtl, batch_size=x_rtl.shape[0])
     print(f"exported {len(result['files'])} RTL files to {hw.DATA_DIR}")

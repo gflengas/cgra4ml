@@ -3,7 +3,7 @@ import re
 import numpy as np
 import pytest
 
-from deepsocflow.py.brevitas.adapter import act_params
+from deepsocflow.py.brevitas.export.adapter import act_params
 
 
 def test_act_params_relu():
@@ -44,7 +44,7 @@ def test_act_params_rejects_unsupported_activation():
 
 import json
 
-from deepsocflow.py.brevitas.sim import FixedPointModel
+from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 
 
 def _bundle_cfg(input_frac, input_bits, weight_values, weight_frac, weight_bits,
@@ -93,8 +93,8 @@ def _two_bundle_model(tmp_path):
 
 
 def test_build_bundles_sets_chain_topology(tmp_path):
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -109,8 +109,8 @@ def test_build_bundles_sets_chain_topology(tmp_path):
 
 def test_build_bundles_registers_into_legacy_bundles_global(tmp_path):
     from deepsocflow.py.numeric import BUNDLES
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -123,8 +123,8 @@ def test_build_bundles_registers_into_legacy_bundles_global(tmp_path):
 
 
 def test_build_bundles_shift_bits_matches_sim(tmp_path):
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -138,8 +138,8 @@ def test_build_bundles_shift_bits_matches_sim(tmp_path):
 
 
 def test_call_int_is_a_noop(tmp_path):
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -153,8 +153,8 @@ def test_call_int_is_a_noop(tmp_path):
 def test_bias_none_when_absent(tmp_path):
     """legacy xbundle.py:135,167 tests `if self.core.b` truthiness - an absent
     bias must be None, never an empty/zero array."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     layers = {
         "bundle0": _bundle_cfg(
@@ -179,7 +179,7 @@ def test_bias_none_when_absent(tmp_path):
 def test_to_legacy_dense_weight_transposes_to_in_out():
     """torch stores a Linear weight as (out, in); legacy's dense branch expects
     (CI, CO) = (in, out) and does the reshape to (1,1,CI,CO) itself."""
-    from deepsocflow.py.brevitas.adapter import to_legacy_dense_weight
+    from deepsocflow.py.brevitas.export.adapter import to_legacy_dense_weight
 
     w = np.array([[1, 2],
                   [3, 4],
@@ -193,8 +193,8 @@ def test_to_legacy_dense_weight_transposes_to_in_out():
 def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
     """xbundle.py:139 does `CI,CO = core.w.itensor.shape` — a 4-D tensor here
     raises 'too many values to unpack'."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -211,8 +211,8 @@ def test_core_tensors_are_2d_for_legacy_dense_branch(tmp_path):
 def test_core_exposes_bias_shifts(tmp_path):
     """xmodel.py:234's config_fw.h writer reads these. Legacy computes them in
     XDense.call_int, which the adapter's no-op call_int never runs."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -226,8 +226,8 @@ def test_core_exposes_bias_shifts(tmp_path):
 def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
     """The gap that let both defects through: no Task 6 test called .export().
     This drives the real legacy reorder path end to end."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -246,8 +246,8 @@ def test_legacy_xbundle_export_runs_on_adapted_bundles(tmp_path):
 def test_softmax_fields_default_to_zero_and_are_set_on_the_softmax_bundle(tmp_path):
     """xmodel.py:234 reads b.softmax_frac and b.softmax_max_i. Legacy defaults
     both to 0 (xbundle.py:47-48) and overrides them only on a softmax bundle."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -267,9 +267,9 @@ def test_full_legacy_export_path_runs_on_adapted_bundles(tmp_path, monkeypatch):
     one that writes config_fw.h. .export() alone is only half the path: every
     defect so far has been an attribute legacy sets inside call_int, which the
     adapter no-ops, and several are read only by the config_fw.h writer."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
-    from deepsocflow.py.brevitas.rtl_export import _export_bundles
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
+    from deepsocflow.py.brevitas.export.rtl_export import _export_bundles
 
     data_dir = tmp_path / 'vectors'
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -289,9 +289,9 @@ def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
     absent (xbundle.py:41,44). Storing False instead makes every bundle claim to
     be flattened and softmaxed. Asserting on the emitted text rather than on the
     attributes is deliberate: that is the level this bug is visible at."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
-    from deepsocflow.py.brevitas.rtl_export import _export_bundles
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
+    from deepsocflow.py.brevitas.export.rtl_export import _export_bundles
 
     data_dir = tmp_path / 'vectors'
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -313,8 +313,8 @@ def test_config_fw_h_flags_flatten_and_softmax_correctly(tmp_path, monkeypatch):
 def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
     """Legacy stores None; xmodel.py:233 tests `is not None` while xbundle.py:144
     tests truthiness, so absent must be None and present must be truthy."""
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
+    from deepsocflow.py.brevitas.export.adapter import build_bundles
+    from deepsocflow.py.brevitas.hardware.hardware import Hardware
 
     hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
                   bits_bias=16, bits_sum=32, data_dir=str(tmp_path / 'vectors'))
@@ -324,52 +324,3 @@ def test_absent_flatten_and_softmax_are_none_not_false(tmp_path):
         assert b.flatten is None
     assert bundles[0].softmax is None
     assert bundles[1].softmax
-
-
-# ---- LUT activations ----
-
-def test_lut_bundle_shifts_onto_the_index_grid_not_the_output_grid(tmp_path):
-    """The one attribute whose meaning changes on a LUT bundle. Under variant 1b
-    the index grid and output grid differ, so computing shift_bits against
-    act_frac would still run and still look plausible while indexing the table at
-    the wrong scale."""
-    pytest.importorskip("torch")
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
-    import deepsocflow.test.py.test_brevitas_lut_1b as h
-
-    _, model = h._run(act_input_bits=8, tmp_path=tmp_path)
-    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
-                  bits_bias=16, bits_sum=32, axi_width=128)
-    bundles = build_bundles(model, hw)
-
-    checked = 0
-    for name, b in zip(model.bundle_order, bundles):
-        cfg = model.bundles[name]
-        lut = cfg['lut']
-        if lut is None:
-            continue
-        acc_frac = cfg['input_frac'] + cfg['weight_frac']
-        assert b.core.act.lut is lut
-        assert b.core.act.shift_bits == acc_frac - lut.in_frac
-        checked += 1
-    assert checked, "no LUT bundles were built - the test would be vacuous"
-
-
-def test_non_lut_bundle_keeps_the_original_shift(tmp_path):
-    pytest.importorskip("torch")
-    import torch.nn as nn
-    from deepsocflow.py.brevitas.adapter import build_bundles
-    from deepsocflow.py.brevitas.hardware import Hardware
-    import deepsocflow.test.py.test_brevitas_lut_1b as h
-
-    _, model = h._run(act_input_bits=None, tmp_path=tmp_path, activation=nn.ReLU)
-    hw = Hardware(processing_elements=(8, 24), bits_input=8, bits_weights=8,
-                  bits_bias=16, bits_sum=32, axi_width=128)
-    bundles = build_bundles(model, hw)
-
-    for name, b in zip(model.bundle_order, bundles):
-        cfg = model.bundles[name]
-        assert b.core.act.lut is None
-        acc_frac = cfg['input_frac'] + cfg['weight_frac']
-        assert b.core.act.shift_bits == b.core.act.plog_slope + acc_frac - cfg['act_frac']

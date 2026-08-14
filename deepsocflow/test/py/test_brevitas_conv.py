@@ -11,10 +11,10 @@ import types
 import numpy as np
 import pytest
 
-from deepsocflow.py.brevitas.sim import (
+from deepsocflow.py.brevitas.simulation.sim import (
     conv2d_same_int, to_hwio, _apply_conv_stride,
 )
-from deepsocflow.py.brevitas.rtl_export import _conv2d_same
+from deepsocflow.py.brevitas.export.rtl_export import _conv2d_same
 
 
 def _rand_int(rng, shape, lo=-8, hi=8):
@@ -100,7 +100,7 @@ def test_stride_start_offset_matches_dataflow_formula():
 
 
 def test_conv_geometry_accepts_same_padding_both_spellings():
-    from deepsocflow.py.brevitas.ptq import _conv_geometry
+    from deepsocflow.py.brevitas.quantization.ptq import _conv_geometry
 
     as_string = _conv_geometry(types.SimpleNamespace(
         kernel_size=(3, 3), stride=(1, 1), dilation=(1, 1), groups=1,
@@ -126,7 +126,7 @@ def test_conv_geometry_accepts_same_padding_both_spellings():
 def test_conv_geometry_rejects_what_the_engine_cannot_run(bad, match):
     # Each of these would otherwise run and produce silently wrong output rather
     # than fail - the engine implements exactly one convolution shape.
-    from deepsocflow.py.brevitas.ptq import _conv_geometry
+    from deepsocflow.py.brevitas.quantization.ptq import _conv_geometry
 
     core = dict(kernel_size=(3, 3), stride=(1, 1), dilation=(1, 1), groups=1,
                 padding='same', in_channels=4, out_channels=8)
@@ -139,7 +139,7 @@ def test_check_hardware_counts_kernel_area_in_acc_width():
     # A conv accumulates over KH*KW*CI taps. Counting only CI under-reports the
     # accumulator width by clog2(KH*KW) - 4 bits for a 3x3 - and would let a
     # model through that overflows the engine's accumulator.
-    from deepsocflow.py.brevitas.export import check_hardware
+    from deepsocflow.py.brevitas.export.export import check_hardware
 
     hw = types.SimpleNamespace(X_BITS=8, K_BITS=8, B_BITS=16, Y_BITS=20)
     model = types.SimpleNamespace(
@@ -147,7 +147,7 @@ def test_check_hardware_counts_kernel_area_in_acc_width():
         bundles={'b0': dict(
             type='conv', conv=dict(kernel_size=(3, 3)),
             input_bits=8, act_bits=8, weight_bits=8, bias_bits=16,
-            in_features=64, act_signed=True, lut=None,
+            in_features=64, act_signed=True,
             input_frac=7, weight_frac=6)},
         trace={})
 
@@ -162,8 +162,8 @@ def test_pad_single_input_channel_is_exact_and_targeted():
     # to two channels with zeros fixes it without changing any output value,
     # which is the property worth pinning: a padding that altered the numbers
     # would trade a loud failure for a quiet one.
-    from deepsocflow.py.brevitas.adapter import pad_single_input_channel
-    from deepsocflow.py.brevitas.sim import conv2d_same_int
+    from deepsocflow.py.brevitas.export.adapter import pad_single_input_channel
+    from deepsocflow.py.brevitas.simulation.sim import conv2d_same_int
 
     rng = np.random.default_rng(3)
     w = _rand_int(rng, (3, 3, 1, 4))          # (KH,KW,CI,CO), CI == 1
@@ -183,7 +183,7 @@ def test_pad_single_input_channel_is_exact_and_targeted():
 
 
 def test_pad_single_input_channel_leaves_normal_layers_alone():
-    from deepsocflow.py.brevitas.adapter import pad_single_input_channel
+    from deepsocflow.py.brevitas.export.adapter import pad_single_input_channel
 
     rng = np.random.default_rng(4)
     w = _rand_int(rng, (3, 3, 8, 4))
@@ -214,7 +214,7 @@ def _c_div_round_table():
 
 
 def test_div_round_matches_c():
-    from deepsocflow.py.brevitas.sim import div_round
+    from deepsocflow.py.brevitas.simulation.sim import div_round
 
     rows = _c_div_round_table()
     assert len(rows) > 1000, "the dump looks truncated"
@@ -239,7 +239,7 @@ def test_div_round_result_always_fits_the_activation_width():
     # computed on the wrong variable and discarded) harmless: the clip it drops
     # would never have fired. An average of in-range values is in range - but the
     # tie-break is odd enough that it is measured here rather than argued.
-    from deepsocflow.py.brevitas.sim import div_round
+    from deepsocflow.py.brevitas.simulation.sim import div_round
 
     lo, hi = -128, 127
     for count in (1, 2, 3, 4, 6, 9, 12, 16, 25, 36):
@@ -254,7 +254,7 @@ def test_avgpool_uses_div_round_not_a_mean():
     # The engine sums the window and applies div_round; an ordinary mean disagrees
     # with it by up to 1 LSB, almost always on negative values. Pinning this stops
     # a "cleaner" reimplementation from silently breaking bit-exactness.
-    from deepsocflow.py.brevitas.sim import avgpool2d_valid_int, div_round
+    from deepsocflow.py.brevitas.simulation.sim import avgpool2d_valid_int, div_round
 
     rng = np.random.default_rng(7)
     x = _rand_int(rng, (2, 4, 4, 3), lo=-128, hi=128)
@@ -278,7 +278,7 @@ def test_avgpool_torch_and_numpy_paths_agree():
     # model. If they disagree, sim-vs-brevitas can never be exactly zero, which is
     # the property every conv stage asserts.
     import torch
-    from deepsocflow.py.brevitas.sim import div_round
+    from deepsocflow.py.brevitas.simulation.sim import div_round
     from deepsocflow.py.brevitas.xlayer.quantPooling import div_round_torch
 
     rng = np.random.default_rng(11)
@@ -295,7 +295,7 @@ def test_batchnorm_fold_is_numerically_equivalent():
     # is measuring agreement with the wrong model.
     import torch
     import torch.nn as nn
-    from deepsocflow.py.brevitas.ptq import _fold_batchnorm
+    from deepsocflow.py.brevitas.quantization.ptq import _fold_batchnorm
 
     torch.manual_seed(0)
     conv = nn.Conv2d(3, 8, 3, padding='same', bias=False)
@@ -323,7 +323,7 @@ def test_batchnorm_fold_creates_a_bias_on_a_bias_free_conv():
     # shift term.
     import torch
     import torch.nn as nn
-    from deepsocflow.py.brevitas.ptq import _fold_batchnorm, _quantize_layer
+    from deepsocflow.py.brevitas.quantization.ptq import _fold_batchnorm, _quantize_layer
 
     torch.manual_seed(1)
     conv = nn.Conv2d(3, 8, 3, padding='same', bias=False).eval()
@@ -343,7 +343,7 @@ def test_batchnorm_fold_creates_a_bias_on_a_bias_free_conv():
 
 def test_batchnorm_fold_requires_eval_mode():
     import torch.nn as nn
-    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
 
     class Net(nn.Module):
         def __init__(self):
@@ -366,7 +366,7 @@ def test_stage_h_actually_exercises_the_fold():
     # which is easy to reintroduce and invisible from a green run.
     import torch
     from deepsocflow.py.brevitas.conv import build_model, stage_data, prime_batchnorm
-    from deepsocflow.py.brevitas.ptq import _fold_batchnorm
+    from deepsocflow.py.brevitas.quantization.ptq import _fold_batchnorm
 
     X, _, _ = stage_data('h')
     model = prime_batchnorm(build_model('h'), X)
@@ -387,8 +387,8 @@ def test_tf_same_padding_reproduces_the_engines_strided_conv(n, k, s):
     # real geometries (224/7/2 stem, 56/3/2 stage transition).
     import torch
     import torch.nn.functional as F
-    from deepsocflow.py.brevitas.ptq import tf_same_padding
-    from deepsocflow.py.brevitas.sim import conv2d_same_int, _apply_conv_stride, to_hwio
+    from deepsocflow.py.brevitas.quantization.ptq import tf_same_padding
+    from deepsocflow.py.brevitas.simulation.sim import conv2d_same_int, _apply_conv_stride, to_hwio
 
     rng = np.random.default_rng(0)
     x = _rand_int(rng, (1, n, n, 4))
@@ -409,7 +409,7 @@ def test_explicit_pad_must_match_the_engines_split():
     # A pad that is merely plausible - symmetric, right total - still shifts every
     # feature map. The check has to be on the exact split, not on the total.
     import types
-    from deepsocflow.py.brevitas.ptq import _assert_explicit_pad_matches_engine, tf_same_padding
+    from deepsocflow.py.brevitas.quantization.ptq import _assert_explicit_pad_matches_engine, tf_same_padding
 
     lo, hi = tf_same_padding(8, 3, 2)
     assert (lo, hi) == (0, 1), "TF's split for 8/3/2 puts nothing on top"
@@ -430,8 +430,8 @@ def test_residual_bundle_output_frac_is_the_add_activations():
     # because nothing consumes its output. Hence the trailing conv here.
     import torch
     import torch.nn as nn
-    from deepsocflow.py.brevitas.ptq import quantized_model
-    from deepsocflow.py.brevitas.sim import FixedPointModel
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
+    from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 
     class Net(nn.Module):
         def __init__(self):

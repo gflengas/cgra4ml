@@ -1,11 +1,14 @@
 import os
 
-from deepsocflow.py.brevitas.hardware import Hardware
-from deepsocflow.py.brevitas.sim import FixedPointModel
+from deepsocflow.py.brevitas.hardware.hardware import Hardware
+from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 from deepsocflow.py.brevitas.xor import X, Y
 
 if __name__ == '__main__':
-    json_path = os.path.join(os.path.dirname(__file__), 'model', 'xor_graph.json')
+    # brevitas package root (parent of hardware/), so model/ and vectors/ land
+    # in the same place they did before this file moved into hardware/.
+    _BREV_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    json_path = os.path.join(_BREV_DIR, 'model', 'xor_graph.json')
 
     # 1. build the model's structure from the already-quantized graph JSON
     #    (shapes, activations, topology - weight/bias arrays not populated yet)
@@ -38,7 +41,7 @@ if __name__ == '__main__':
     #    a separate export_inference call here would just get its own output
     #    to that same DATA_DIR deleted and overwritten by this one - dead work
     #    with a misleading print. export_inference itself is still exported
-    #    and tested (deepsocflow/py/brevitas/export.py) for callers that only
+    #    and tested (deepsocflow/py/brevitas/export/export.py) for callers that only
     #    want the golden reference without the engine-layout files.
     # data_dir must be relative to the CURRENT WORKING DIRECTORY, not just to
     # this file: the legacy xmodel.py writes config_fw.h's DATA_DIR macro as
@@ -68,9 +71,9 @@ if __name__ == '__main__':
         processing_elements=(8, 24),
         bits_input=8, bits_weights=8, bits_bias=16, bits_sum=32,
         axi_width=128,
-        data_dir=os.path.relpath(os.path.join(os.path.dirname(__file__), 'vectors')))
+        data_dir=os.path.relpath(os.path.join(_BREV_DIR, 'vectors')))
 
-    from deepsocflow.py.brevitas.export import export_rtl
+    from deepsocflow.py.brevitas.export.export import export_rtl
 
     print()
     rtl_result = export_rtl(model, hw, X, batch_size=4)
@@ -80,11 +83,12 @@ if __name__ == '__main__':
     #    verify_inference reads only the legacy BUNDLES global (already
     #    populated by export_rtl above) and hw - its `model` argument is
     #    unused, so we pass None.
-    from deepsocflow.py.brevitas.rtl_export import verify_inference
+    from deepsocflow.py.brevitas.export.rtl_export import verify_inference
 
     # hw.simulate() runs as-is here: under plain `python -m
-    # deepsocflow.py.brevitas.main` it's this backend's own Hardware.simulate
-    # (deepsocflow/py/brevitas/hardware.py). Under docker_sim.py - the only way
+    # deepsocflow.py.brevitas.hardware.main` it's this backend's own
+    # Hardware.simulate (deepsocflow/py/brevitas/hardware/hardware.py). Under
+    # docker_sim.py - the only way
     # to actually simulate on this host, since neither locally available
     # Verilator can build/run this design (see that script's docstring) -
     # docker_sim.py itself monkeypatches both this class and the legacy

@@ -5,19 +5,12 @@ from torch import nn
 from brevitas.inject.defaults import Int8ActPerTensorFloat
 from brevitas.nn.quant_activation import QuantIdentity as _QuantIdentity
 from brevitas.nn.quant_activation import QuantReLU as _QuantReLU
-from brevitas.nn.quant_activation import QuantSigmoid as _QuantSigmoid
-from brevitas.nn.quant_activation import QuantTanh as _QuantTanh
 from brevitas.nn.quant_layer import ActQuantType
 from brevitas.nn.quant_layer import QuantNonLinearActLayer as QuantNLAL
 
 '''
 - ReLU /
-- Sigmoid /
-- Tanh /
 - LeakyReLU /
-- SiLU /
-- SELU
-- GELU /
 - Softmax
 '''
 
@@ -60,30 +53,6 @@ class QuantReLU(_QuantReLU):
     #   y = relu4(x)  # 4-bit output, returned as IntQuantTensor
     pass
 
-class QuantSigmoid(_QuantSigmoid):
-    # Arguments: same as QuantReLU (act_quant default: Uint8ActPerTensorFloat, 8-bit
-    #   unsigned; input_quant, bit_width, return_quant_tensor).
-    #
-    # Input:  x, any shape - Tensor or QuantTensor
-    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
-    #
-    # Usage:
-    #   sigmoid = QuantSigmoid(bit_width=4)
-    #   y = sigmoid(x)
-    pass
-
-class QuantTanh(_QuantTanh):
-    # Arguments: same as QuantReLU, but act_quant defaults to Int8ActPerTensorFloat
-    #   (8-bit signed, since tanh's output range is [-1, 1]).
-    #
-    # Input:  x, any shape - Tensor or QuantTensor
-    # Output: same shape as input - Tensor, or IntQuantTensor if return_quant_tensor=True
-    #
-    # Usage:
-    #   tanh = QuantTanh(bit_width=4)
-    #   y = tanh(x)
-    pass
-
 class QuantLeakyReLU(QuantNLAL):
     # Wraps torch.nn.LeakyReLU with output quantization.
     #
@@ -109,72 +78,6 @@ class QuantLeakyReLU(QuantNLAL):
         QuantNLAL.__init__(
             self,
             act_impl=nn.LeakyReLU,
-            passthrough_act=False,
-            input_quant=input_quant,
-            act_quant=act_quant,
-            return_quant_tensor=return_quant_tensor,
-            **kwargs)
-
-class QuantSiLU(QuantNLAL):
-    # Wraps torch.nn.SiLU with output quantization. Arguments/Input/Output: same
-    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
-    #
-    # Usage:
-    #   act = QuantSiLU(bit_width=4)
-    #   y = act(x)
-    def __init__(
-            self,
-            act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
-            input_quant: Optional[ActQuantType] = None,
-            return_quant_tensor: bool = False,
-            **kwargs):
-        QuantNLAL.__init__(
-            self,
-            act_impl=nn.SiLU,
-            passthrough_act=False,
-            input_quant=input_quant,
-            act_quant=act_quant,
-            return_quant_tensor=return_quant_tensor,
-            **kwargs)
-
-class QuantSELU(QuantNLAL):
-    # Wraps torch.nn.SELU with output quantization. Arguments/Input/Output: same
-    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
-    #
-    # Usage:
-    #   act = QuantSELU(bit_width=4)
-    #   y = act(x)
-    def __init__(
-            self,
-            act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
-            input_quant: Optional[ActQuantType] = None,
-            return_quant_tensor: bool = False,
-            **kwargs):
-        QuantNLAL.__init__(
-            self,
-            act_impl=nn.SELU,
-            passthrough_act=False,
-            input_quant=input_quant,
-            act_quant=act_quant,
-            return_quant_tensor=return_quant_tensor,
-            **kwargs)
-
-class QuantGELU(QuantNLAL):
-    # Wraps torch.nn.GELU with output quantization. Arguments/Input/Output: same
-    # pattern as QuantLeakyReLU (act_quant default: Int8ActPerTensorFloat, 8-bit signed).
-    #
-    # Usage:
-    #   act = QuantGELU(bit_width=4)
-    #   y = act(x)
-    def __init__(
-            self,
-            act_quant: Optional[ActQuantType] = Int8ActPerTensorFloat,
-            input_quant: Optional[ActQuantType] = None,
-            return_quant_tensor: bool = False,
-            **kwargs):
-        QuantNLAL.__init__(
-            self,
-            act_impl=nn.GELU,
             passthrough_act=False,
             input_quant=input_quant,
             act_quant=act_quant,

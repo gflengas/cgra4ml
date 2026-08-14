@@ -95,7 +95,7 @@ def _c_div(a, b):
 def div_round_torch(a, b):
 	"""runtime.h's div_round, on a tensor of integer-valued floats.
 
-	Mirrors deepsocflow/py/brevitas/sim.py::div_round exactly; that one is pinned
+	Mirrors deepsocflow/py/brevitas/simulation/sim.py::div_round exactly; that one is pinned
 	against the compiled C macro, and this one is pinned against it in turn.
 	"""
 	correction = torch.bitwise_and(

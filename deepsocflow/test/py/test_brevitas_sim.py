@@ -3,15 +3,15 @@ import json
 import numpy as np
 import pytest
 
-from deepsocflow.py.brevitas import sim
-from deepsocflow.py.brevitas.sim import FixedPointModel
+from deepsocflow.py.brevitas.simulation import sim
+from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 
 
 def _bundle(input_frac, input_bits, weight_values, weight_frac, weight_bits,
             activation, act_bits, act_frac, bias_values=None, bias_frac=None,
             bias_bits=None, softmax=False, input_name=None, type_="linear"):
     """Builds one entry of a graph JSON's "layers" dict, matching the schema
-    quantized_model.export_graph_json() produces (deepsocflow/py/brevitas/ptq.py).
+    quantized_model.export_graph_json() produces (deepsocflow/py/brevitas/quantization/ptq.py).
     Only includes the fields sim.py actually reads."""
     in_features = len(weight_values[0])
     out_features = len(weight_values)
@@ -178,9 +178,8 @@ def test_softmax_output_matches_manual_softmax(tmp_path):
 
 
 def test_unsupported_activation_raises(tmp_path):
-    # 'mish' is in neither SUPPORTED_ACTIVATIONS (shift+clip) nor
-    # CURVED_ACTIVATIONS (value LUT) - there is no float reference for it in
-    # lut.py::ACT_FUNCS, so it cannot be tabulated either.
+    # 'mish' is not in SUPPORTED_ACTIVATIONS (shift+clip) - only relu/identity
+    # run in integer arithmetic; nothing else has an implementation.
     layers = {
         "bundle0": _bundle(input_frac=7, input_bits=8,
                             weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
@@ -192,52 +191,18 @@ def test_unsupported_activation_raises(tmp_path):
         FixedPointModel(json_path)
 
 
-def test_curved_activation_builds_a_lut(tmp_path):
-    # silu used to raise here. It now builds a table instead - this is the whole
-    # point of the LUT path, so the flip is asserted directly rather than only
-    # implied by the absence of a raise.
+def test_curved_activation_raises(tmp_path):
+    # silu has no shift+clip implementation and is not deployable at all - only
+    # relu/leaky_relu/identity are.
     layers = {
         "bundle0": _bundle(input_frac=7, input_bits=8,
                             weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
                             bias_values=[0], bias_frac=13, bias_bits=16,
                             activation="silu", act_bits=8, act_frac=4),
     }
-    model = FixedPointModel(_write_graph(tmp_path, layers))
-    lut = model.bundles["bundle0"]["lut"]
-    assert lut is not None
-    # variant 1a: with no lut_grid override the index grid is the output grid
-    assert (lut.in_bits, lut.in_frac) == (8, 4)
-    assert lut.table.shape == (256,)
-
-
-def test_lut_grid_overrides_the_1a_default(tmp_path):
-    layers = {
-        "bundle0": _bundle(input_frac=7, input_bits=8,
-                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
-                            bias_values=[0], bias_frac=13, bias_bits=16,
-                            activation="tanh", act_bits=8, act_frac=7),
-    }
     json_path = _write_graph(tmp_path, layers)
-    model = FixedPointModel(json_path, lut_grid={"bundle0": (10, 6)})
-    lut = model.bundles["bundle0"]["lut"]
-    assert (lut.in_bits, lut.in_frac) == (10, 6)
-    assert lut.table.shape == (1024,)
-    # output grid is untouched by the override - it belongs to the model, not the table
-    assert (lut.out_bits, lut.out_frac) == (8, 7)
-
-
-def test_relu_bundle_gets_no_lut(tmp_path):
-    # relu/identity must stay on the shift+clip path: a table for them would be
-    # pure waste, and silently routing them through one would hide regressions
-    # in quant_lrelu parity.
-    layers = {
-        "bundle0": _bundle(input_frac=7, input_bits=8,
-                            weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
-                            bias_values=[0], bias_frac=13, bias_bits=16,
-                            activation="relu", act_bits=8, act_frac=6),
-    }
-    model = FixedPointModel(_write_graph(tmp_path, layers))
-    assert model.bundles["bundle0"]["lut"] is None
+    with pytest.raises(ValueError, match="silu"):
+        FixedPointModel(json_path)
 
 
 def test_unsupported_layer_type_raises(tmp_path):

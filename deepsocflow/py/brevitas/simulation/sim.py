@@ -2,25 +2,27 @@ import json
 
 import numpy as np
 
-from deepsocflow.py.brevitas.lut import ActLut, CURVED_ACTIVATIONS, clip_to
-
 # Activations whose act_quant is unsigned (Uint8ActPerTensorFixedPoint in ptq.py's
 # ACT_MAP) - their quantized output range is [0, 2**bits-1], not the signed
 # [-2**(bits-1), 2**(bits-1)-1] used everywhere else. export_graph_json now emits
 # act_signed/input_signed per tensor directly (ptq.py), so this name-based table is
 # only a fallback for JSONs exported before those fields existed - the primary
 # mechanism is reading act_signed/input_signed straight from the JSON.
-UNSIGNED_ACTIVATIONS = {'relu', 'sigmoid'}
+UNSIGNED_ACTIVATIONS = {'relu'}
 
 # Activations this simulator executes as shift + clip, mirroring quant_lrelu
 # (deepsocflow/c/runtime.h:153) - the closed form only works for functions that are
-# piecewise-linear through the origin.
+# piecewise-linear through the origin. Curved activations (silu/tanh/sigmoid/gelu/
+# selu) are not supported at all.
 SUPPORTED_ACTIVATIONS = {'relu', 'identity'}
 
-# Everything curved (silu/tanh/sigmoid/gelu/selu) is executed instead as a value
-# LUT - still pure integer, still no multiplier, just a table load. See
-# deepsocflow/py/brevitas/lut.py. Together these two sets are what this simulator
-# can run; anything outside both is rejected in _build_topology.
+
+def clip_to(values, bits, signed):
+    """Saturating clip to a fixed-point word, matching how brevitas's own
+    quantizers clip rather than wrap."""
+    if signed:
+        return np.clip(values, -2 ** (bits - 1), 2 ** (bits - 1) - 1)
+    return np.clip(values, 0, 2 ** bits - 1)
 
 
 def shift_round(n, s):
@@ -202,14 +204,9 @@ class FixedPointModel:
     #   logits_int = model.forward(x_int)    # pre-softmax; softmax is monotonic,
     #                                         # so argmax(logits_int) == argmax(softmax(logits))
 
-    def __init__(self, json_path, lut_grid=None):
-        """lut_grid: optional {bundle_name: (in_bits, in_frac)} choosing the index
-        grid for that bundle's activation LUT. Left unset, a curved activation
-        gets the variant-1a default of indexing at its own output grid - which
-        suits silu but not the saturating functions (see ActLut.for_bundle)."""
+    def __init__(self, json_path):
         self.bundle_order = []
         self.bundles = {}
-        self.lut_grid = dict(lut_grid or {})
         self._build_topology(json_path)
 
     def _build_topology(self, json_path):
@@ -224,12 +221,11 @@ class FixedPointModel:
                     f"FixedPointModel only supports type='linear' and type='conv' "
                     f"bundles (bundle '{name}' has type='{cfg['type']}')")
             activation = cfg['activation']
-            if activation not in SUPPORTED_ACTIVATIONS and activation not in CURVED_ACTIVATIONS:
+            if activation not in SUPPORTED_ACTIVATIONS:
                 raise ValueError(
                     f"FixedPointModel can't execute activation '{activation}' "
-                    f"(bundle '{name}') in integer arithmetic - "
-                    f"{sorted(SUPPORTED_ACTIVATIONS)} run as shift+clip and "
-                    f"{sorted(CURVED_ACTIVATIONS)} run as a value LUT.")
+                    f"(bundle '{name}') in integer arithmetic - only "
+                    f"{sorted(SUPPORTED_ACTIVATIONS)} run as shift+clip.")
 
             bias_cfg = cfg.get('bias')
             bias_frac = bias_cfg['frac'] if bias_cfg is not None else cfg['input_frac'] + cfg['weight']['frac']
@@ -246,27 +242,6 @@ class FixedPointModel:
             input_signed = cfg.get('input_signed')
             if input_signed is None:
                 input_signed = True
-
-            # Curved activations get a table; relu/identity stay on the cheaper
-            # shift+clip path in forward(). in_signed is always True regardless of
-            # act_signed: the index is an accumulator, which is signed even when
-            # the activation's output is not (sigmoid being the obvious case).
-            lut = None
-            if activation in CURVED_ACTIVATIONS:
-                # Precedence: an explicit lut_grid wins; otherwise a variant-1b
-                # model's exported act_in_* grid, which is the one that makes the
-                # table bit-exact; otherwise the variant-1a default of indexing at
-                # the output grid.
-                if name in self.lut_grid:
-                    in_bits, in_frac = self.lut_grid[name]
-                else:
-                    in_bits = cfg.get('act_in_bits')
-                    in_frac = cfg.get('act_in_frac')
-                lut = ActLut.for_bundle(
-                    activation=activation,
-                    act_bits=cfg['act_bits'], act_frac=cfg['act_frac'],
-                    act_signed=act_signed,
-                    in_bits=in_bits, in_frac=in_frac, in_signed=True)
 
             is_conv = cfg['type'] == 'conv'
             if is_conv:
@@ -326,7 +301,6 @@ class FixedPointModel:
                 act_bits=cfg['act_bits'],
                 act_frac=cfg['act_frac'],
                 act_signed=act_signed,
-                lut=lut,
                 softmax=cfg['softmax'],
                 weight=None,  # populated by load_int_weights()
                 bias=None,
@@ -436,18 +410,9 @@ class FixedPointModel:
 
             acc = acc_in + bundle['bias']         # int64, frac = acc_frac
 
-            lut = bundle['lut']
-            if lut is not None:
-                # Shift the accumulator onto the table's index grid, clip, load.
-                # index_shift() is where the power-of-two guard lives: the rescale
-                # has to be a right shift, never a multiply.
-                idx = shift_round(acc, lut.index_shift(acc_frac))
-                idx = clip_to(idx, lut.in_bits, lut.in_signed)
-                out = lut.lookup(idx)
-            else:
-                acc_for_shift = np.clip(acc, 0, None) if bundle['activation'] == 'relu' else acc
-                out = shift_round(acc_for_shift, acc_frac - bundle['act_frac'])
-                out = clip_to(out, bundle['act_bits'], bundle['act_signed'])
+            acc_for_shift = np.clip(acc, 0, None) if bundle['activation'] == 'relu' else acc
+            out = shift_round(acc_for_shift, acc_frac - bundle['act_frac'])
+            out = clip_to(out, bundle['act_bits'], bundle['act_signed'])
 
             # Pooling runs after the core activation, mirroring runtime.h's order
             # (CORE ACT -> residual -> POOLING). 'act' keeps the pre-pool tensor:
@@ -483,7 +448,15 @@ class FixedPointModel:
 
             self.trace[name] = {'x': inp, 'y': y, 'acc': acc, 'act': act_out, 'out': out}
             self.outputs[name] = out
-            prev_frac[name] = bundle['act_frac']
+            # The frac the bundle's OUTPUT is on, which is not always the core
+            # activation's: a residual add requantizes through its own activation,
+            # so a bundle with a skip ends on the add's grid. Pooling and flatten
+            # preserve the grid, so they do not enter into it. Recording act_frac
+            # unconditionally here made the next bundle apply a spurious shift -
+            # invisible whenever the residual bundle happened to be last, which is
+            # exactly what the first residual test looked like.
+            prev_frac[name] = (bundle['add']['act_frac'] if bundle['add'] is not None
+                               else bundle['act_frac'])
 
         last_name = self.bundle_order[-1]
         last_bundle = self.bundles[last_name]

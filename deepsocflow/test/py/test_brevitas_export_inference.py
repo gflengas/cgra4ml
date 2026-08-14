@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 import torch
 
-from deepsocflow.py.brevitas.export import check_hardware, export_inference
-from deepsocflow.py.brevitas.hardware import Hardware
-from deepsocflow.py.brevitas.sim import FixedPointModel
+from deepsocflow.py.brevitas.export.export import check_hardware, export_inference
+from deepsocflow.py.brevitas.hardware.hardware import Hardware
+from deepsocflow.py.brevitas.simulation.sim import FixedPointModel
 from deepsocflow.py.brevitas.xor import MODEL_DIR, MODEL_PATH, X, Y
 
 pytestmark = pytest.mark.skipif(
@@ -19,7 +19,7 @@ def _build_model(tmp_path):
     """Rebuilds quantized_model from the checked-in trained weights, regenerates
     the graph JSON into tmp_path (never reads the repo copy - it's a derived
     artefact and could be stale), and returns a forward()-ready FixedPointModel."""
-    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
     from deepsocflow.py.brevitas.xor import XOR, load
 
     net = XOR()
@@ -130,7 +130,7 @@ def test_hardware_weight_bits_mismatch_raises(tmp_path):
     # adapter.py's build_bundles labels every weight tensor with bits=hw.K_BITS
     # regardless of the JSON's real weight bit-width, so a mismatch here is
     # silent unless check_hardware catches it explicitly.
-    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
     from deepsocflow.py.brevitas.xor import XOR, load
 
     net = XOR()
@@ -158,7 +158,7 @@ def test_hardware_bias_bits_exceeding_b_bits_raises(tmp_path):
     # Failure scenario from the review: layer_bits sets bias_bits=32 while
     # Hardware only configures bits_bias=16 - xmodel.py's b.be.astype(np.int16)
     # would silently wrap those bias values into wb.bin without this check.
-    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.quantization.ptq import quantized_model
     from deepsocflow.py.brevitas.xor import XOR, load
 
     net = XOR()

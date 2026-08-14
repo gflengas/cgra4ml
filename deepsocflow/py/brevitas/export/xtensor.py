@@ -1,5 +1,5 @@
 """Numpy-only port of deepsocflow/py/utils.py::XTensor, for the brevitas
-export path (deepsocflow/py/brevitas/rtl_export.py). Same fixed-point
+export path (deepsocflow/py/brevitas/export/rtl_export.py). Same fixed-point
 bookkeeping and math as the original - the only difference is that ftensor/
 itensor hold numpy arrays instead of tf.Tensor, so this file needs no
 tensorflow import at all.

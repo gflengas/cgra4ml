@@ -29,7 +29,7 @@ import os
 import torch
 import torch.nn as nn
 
-from deepsocflow.py.brevitas.ptq import tf_same_padding
+from deepsocflow.py.brevitas.quantization.ptq import tf_same_padding
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "model")
 MODEL_PATH = os.path.join(MODEL_DIR, "conv.pt")

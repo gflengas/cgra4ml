@@ -11,12 +11,10 @@ from brevitas.quant.fixed_point import (
 from brevitas.graph.calibrate import calibration_mode
 from brevitas.export import export_qonnx
 
-from deepsocflow.py.brevitas.utils import reset_bundles
-from deepsocflow.py.brevitas.xbundle.xbundle import XBundle
+from deepsocflow.py.brevitas.xbundle.xbundle import XBundle, reset_bundles
 from deepsocflow.py.brevitas.xlayer.quantLayer import QuantLinear, QuantConv1d, QuantConv2d, QuantConv3d
 from deepsocflow.py.brevitas.xlayer.quantActivation import (
-	QuantIdentity, QuantReLU, QuantSigmoid, QuantTanh,
-	QuantLeakyReLU, QuantSiLU, QuantSELU, QuantGELU,
+	QuantIdentity, QuantReLU, QuantLeakyReLU,
 )
 from deepsocflow.py.brevitas.xlayer.quantPooling import (
 	QuantAvgPool2d, QuantAdaptiveAvgPool2d, QuantAvgPool2dDivRound,
@@ -255,18 +253,10 @@ def _quantize_layer(layer, weight_bits=8, bias_bits=32, own_input_quant=True):
 	return quant_layer
 
 
-# Activations with no shift-and-clip closed form. On hardware these are executed
-# as a value LUT (deepsocflow/py/brevitas/lut.py), and only these are eligible for
-# the input_quant that variant 1b needs - relu/leaky_relu/identity keep running on
-# quant_lrelu, so giving them an input quantizer would add a quantization point
-# that buys nothing.
-CURVED_ACT_TYPES = (nn.Sigmoid, nn.Tanh, nn.SiLU, nn.SELU, nn.GELU)
-
-
-def _quantize_activation(act, act_input_bits=None, share_act_quant=None):
+def _quantize_activation(act, share_act_quant=None):
 	# Activations: plain torch type -> (our xlayer quant equivalent, power-of-two scale
-	# act_quant matching its sign - Uint8 for ReLU/Sigmoid outputs, which are >= 0,
-	# Int8 for everything else).
+	# act_quant matching its sign - Uint8 for ReLU's output, which is >= 0, Int8 for
+	# everything else).
 	if isinstance(act, nn.LeakyReLU):
 		# quant_lrelu (deepsocflow/c/runtime.h:153) implements the negative-side
 		# scaling as a pure left-shift, so it can only realize slopes that are
@@ -282,12 +272,7 @@ def _quantize_activation(act, act_input_bits=None, share_act_quant=None):
 
 	ACT_MAP = {
 		nn.ReLU: (QuantReLU, Uint8ActPerTensorFixedPoint),
-		nn.Sigmoid: (QuantSigmoid, Uint8ActPerTensorFixedPoint),
-		nn.Tanh: (QuantTanh, Int8ActPerTensorFixedPoint),
 		nn.LeakyReLU: (QuantLeakyReLU, Int8ActPerTensorFixedPoint),
-		nn.SiLU: (QuantSiLU, Int8ActPerTensorFixedPoint),
-		nn.SELU: (QuantSELU, Int8ActPerTensorFixedPoint),
-		nn.GELU: (QuantGELU, Int8ActPerTensorFixedPoint),
 		nn.Identity: (QuantIdentity, Int8ActPerTensorFixedPoint),
 	}
 	entry = ACT_MAP.get(type(act))
@@ -317,32 +302,13 @@ def _quantize_activation(act, act_input_bits=None, share_act_quant=None):
 	# own_input_quant=False) can consume it directly instead of re-quantizing.
 	kwargs = {"act_quant": act_quant, "return_quant_tensor": True}
 
-	# Unsigned activations (ReLU/Sigmoid) are narrowed to bits-1 so their output
-	# still fits the signed datapath every other tensor in this project uses
-	# (mirrors xlayers.py:31-33: "QKeras treats relu as unsigned, we have
-	# everything signed, so we reduce bitwidth" - an unsigned 8-bit value can
-	# reach 255, which silently wraps when packed into a signed 8-bit word).
+	# Unsigned activations (ReLU) are narrowed to bits-1 so their output still
+	# fits the signed datapath every other tensor in this project uses (mirrors
+	# xlayers.py:31-33: "QKeras treats relu as unsigned, we have everything
+	# signed, so we reduce bitwidth" - an unsigned 8-bit value can reach 255,
+	# which silently wraps when packed into a signed 8-bit word).
 	if act_quant is Uint8ActPerTensorFixedPoint:
 		kwargs["bit_width"] = 7
-
-	# Variant 1b: quantize the activation's INPUT as well as its output.
-	#
-	# Without this, brevitas evaluates the activation on the full-precision
-	# accumulator while the hardware evaluates it on a table indexed by a
-	# shifted-down accumulator - so the two can only agree if the table indexes at
-	# the accumulator's own frac, which measures out at 64-128 KB per activation
-	# (see lut_poc.py's sweep). Adding input_quant makes brevitas round the
-	# accumulator first, exactly as the hardware does, and a 2**act_input_bits
-	# entry table then reproduces it bit-exactly.
-	#
-	# The approximation does not disappear - it moves from "hardware silently
-	# disagrees with the model" to "the model itself is coarser", where
-	# calibration measures it and QAT can train against it. This does add a second
-	# quantization point to the bundle, which the 2026-08-10 single-quantization-
-	# point design deliberately avoided; it is opt-in for that reason.
-	if act_input_bits is not None and isinstance(act, CURVED_ACT_TYPES):
-		kwargs["input_quant"] = Int8ActPerTensorFixedPoint
-		kwargs["input_bit_width"] = act_input_bits
 
 	return quant_cls(**kwargs)
 
@@ -414,11 +380,6 @@ class quantized_model(nn.Module):
 	# to override the default for specific layers, keyed by the float net's own
 	# attribute name (e.g. {"hidden_1": {"weight_bits": 4}}).
 	#
-	# act_input_bits: None (default) leaves curved activations evaluated on the
-	# full-precision accumulator - the hardware LUT then only approximates them.
-	# Setting it (e.g. 8) quantizes each curved activation's input too, which is
-	# what makes a 2**act_input_bits entry LUT bit-exact. See _quantize_activation.
-	#
 	# residuals: optional {consumer_attr: source_attr} declaring skip connections,
 	# keyed by the float net's own attribute names (e.g. {"conv_2": "conv_1"} adds
 	# conv_1's bundle output into conv_2's bundle). The builder walks
@@ -428,11 +389,10 @@ class quantized_model(nn.Module):
 	# consumes the exported JSON, so this can be replaced by real tracing later
 	# without touching anything else.
 	def __init__(self, net, weight_bits=8, bias_bits=32, layer_bits=None,
-	             act_input_bits=None, residuals=None):
+	             residuals=None):
 		super().__init__()
 		self.bundles = nn.ModuleList()
 		layer_bits = layer_bits or {}
-		self.act_input_bits = act_input_bits
 		residuals = residuals or {}
 		self.skip_source = {}   # consumer bundle index -> source bundle index
 		_bundle_of_attr = {}    # float net attribute name -> bundle index
@@ -513,7 +473,7 @@ class quantized_model(nn.Module):
 				share_act_quant = src_act.act_quant
 
 			quant_act = _quantize_activation(
-				children[i], act_input_bits, share_act_quant=share_act_quant
+				children[i], share_act_quant=share_act_quant
 			) if i < len(children) else None
 			if quant_act is not None:
 				core.act = quant_act
@@ -698,19 +658,6 @@ class quantized_model(nn.Module):
 					layer["act_scale"] = act_scale
 					layer["act_zero_point"] = core.act.act_quant.zero_point().item()
 					layer["act_signed"] = bool(core.act.act_quant.is_signed)
-
-				# Variant 1b only: the grid the activation's input was quantized
-				# onto. A LUT indexed on exactly this grid reproduces brevitas's
-				# own output bit-exactly, so sim.py sizes the table from these
-				# rather than guessing. Absent for 1a models, where brevitas
-				# evaluated the activation on the raw accumulator.
-				act_in_quant = getattr(core.act, 'input_quant', None)
-				if act_in_quant is not None and act_in_quant.is_quant_enabled:
-					act_in_scale = act_in_quant.scale().item()
-					layer["act_in_bits"] = int(act_in_quant.bit_width().item())
-					layer["act_in_frac"] = _frac_bits(act_in_scale)
-					layer["act_in_scale"] = act_in_scale
-					layer["act_in_signed"] = bool(act_in_quant.is_signed)
 
 				# Pool runs after the core activation and before flatten, matching
 				# runtime.h's order. Only the three fields dataflow.py reads are
