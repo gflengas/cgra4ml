@@ -279,7 +279,7 @@ def test_avgpool_torch_and_numpy_paths_agree():
     # the property every conv stage asserts.
     import torch
     from deepsocflow.py.brevitas.sim import div_round
-    from deepsocflow.py.brevitas.xlayer.quantAvgPoolDivRound import div_round_torch
+    from deepsocflow.py.brevitas.xlayer.quantPooling import div_round_torch
 
     rng = np.random.default_rng(11)
     for count in (1, 4, 9, 16):
@@ -420,3 +420,53 @@ def test_explicit_pad_must_match_the_engines_split():
     symmetric_but_wrong = dict(kernel_size=[3, 3], stride=[2, 2], explicit_pad=[1, 1, 1, 1])
     with pytest.raises(AssertionError, match="explicit pad"):
         _assert_explicit_pad_matches_engine(symmetric_but_wrong, 8, 8)
+
+
+def test_residual_bundle_output_frac_is_the_add_activations():
+    # A bundle with a skip ends on its ADD activation's grid, not its core
+    # activation's, so that is the frac the next bundle must be told about.
+    # Recording act_frac instead makes the consumer apply a spurious shift - and
+    # the bug is invisible whenever the residual bundle happens to be last,
+    # because nothing consumes its output. Hence the trailing conv here.
+    import torch
+    import torch.nn as nn
+    from deepsocflow.py.brevitas.ptq import quantized_model
+    from deepsocflow.py.brevitas.sim import FixedPointModel
+
+    class Net(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.conv_1 = nn.Conv2d(3, 8, 3, padding='same', bias=True)
+            self.relu_1 = nn.ReLU()
+            self.conv_2 = nn.Conv2d(8, 8, 3, padding='same', bias=True)
+            self.relu_2 = nn.ReLU()
+            self.conv_3 = nn.Conv2d(8, 2, 1, bias=True)      # consumes the residual bundle
+
+        def forward(self, x):
+            skip = self.relu_1(self.conv_1(x))
+            return self.conv_3(self.relu_2(self.conv_2(skip)) + skip)
+
+    torch.manual_seed(0)
+    x = (torch.rand(32, 3, 8, 8) > 0.5).float()
+    qm = quantized_model(Net().eval(), weight_bits=8, bias_bits=16,
+                         residuals={'conv_2': 'conv_1'})
+    qm.quantization(x)
+    qm.eval()
+
+    import tempfile, os
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, 'g.json')
+        qm.export_graph_json(x[:4], path)
+        fp = FixedPointModel(path)
+        fp.load_int_weights(path)
+        out = fp.forward(fp.quantize_input(x[:4]))
+
+    with torch.no_grad():
+        ref = qm(x[:4])
+    ref = (ref.value if hasattr(ref, 'value') else ref).detach().numpy()
+    last = fp.bundles[fp.bundle_order[-1]]
+    got = (out.astype('float64') / 2 ** last['act_frac']).transpose(0, 3, 1, 2)
+
+    assert np.array_equal(got, ref), (
+        f"{int((got != ref).sum())}/{got.size} values differ - the bundle after a "
+        f"residual is reading its input on the wrong fractional grid")

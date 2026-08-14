@@ -18,11 +18,9 @@ from deepsocflow.py.brevitas.xlayer.quantActivation import (
 	QuantIdentity, QuantReLU, QuantSigmoid, QuantTanh,
 	QuantLeakyReLU, QuantSiLU, QuantSELU, QuantGELU,
 )
-from deepsocflow.py.brevitas.xlayer.quantAvgPoolDivRound import QuantAvgPool2dDivRound
 from deepsocflow.py.brevitas.xlayer.quantPooling import (
-	QuantAvgPool2d, QuantAdaptiveAvgPool2d,
-	QuantMaxPool1d, QuantMaxPool2d, QuantMaxPool3d,
-	QuantAdaptiveMaxPool1d, QuantAdaptiveMaxPool2d, QuantAdaptiveMaxPool3d,
+	QuantAvgPool2d, QuantAdaptiveAvgPool2d, QuantAvgPool2dDivRound,
+	QuantMaxPool2d, QuantAdaptiveMaxPool2d,
 )
 
 # model json or model.py
@@ -383,7 +381,7 @@ def _quantize_pool(pool):
 	if pool_type == 'avg':
 		# NOT brevitas's QuantAvgPool2d (TruncAvgPool2d): that sums and truncates to
 		# a bit width - a shift - while the engine sums and applies runtime.h's
-		# div_round. See quantAvgPoolDivRound.py.
+		# div_round. See QuantAvgPool2dDivRound in quantPooling.py.
 		quant_pool = quant_cls(kernel_size=(kh, kw), stride=(sh, sw), padding=(ph, pw))
 	else:
 		quant_pool = quant_cls(kernel_size=(kh, kw), stride=(sh, sw), padding=(ph, pw))

@@ -249,7 +249,7 @@ class StageG(nn.Module):
     """Average pooling instead of max.
 
     The engine sums the window and divides with runtime.h's div_round, which is
-    not ordinary rounding - see xlayer/quantAvgPoolDivRound.py. Only 'valid'
+    not ordinary rounding - see QuantAvgPool2dDivRound in xlayer/quantPooling.py. Only 'valid'
     padding (torch padding=0) is implemented, which keeps the divisor constant.
     """
 

@@ -1,7 +1,10 @@
+import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from brevitas.nn.quant_avg_pool import TruncAvgPool2d as _TruncAvgPool2d
 from brevitas.nn.quant_avg_pool import TruncAdaptiveAvgPool2d as _TruncAdaptiveAvgPool2d
+from brevitas.quant_tensor import IntQuantTensor
 
 class QuantAvgPool2d(_TruncAvgPool2d):
 		# Average pool that truncates the accumulated sum to a fixed bit width, matching
@@ -49,21 +52,6 @@ class QuantAdaptiveAvgPool2d(_TruncAdaptiveAvgPool2d):
 		#   y = pool(relu(x))  # global average pool, any input H/W
 		pass
 
-class QuantMaxPool1d(nn.MaxPool1d):
-		# Plain (unquantized) max pool, 1D. See QuantMaxPool2d below for why max pooling
-		# needs no quantization arguments.
-		#
-		# Arguments: same as torch.nn.MaxPool1d (kernel_size, stride, padding, dilation,
-		#   return_indices, ceil_mode).
-		#
-		# Input:  x, shape (N, C, L) - Tensor or QuantTensor
-		# Output: shape (N, C, L_out) - same type as input
-		#
-		# Usage:
-		#   pool = QuantMaxPool1d(kernel_size=3, stride=2, padding=1)
-		#   y = pool(x)
-		pass
-
 class QuantMaxPool2d(nn.MaxPool2d):
 		# Plain (unquantized) max pool - max selects an existing value rather than
 		# accumulating one, so there is nothing to truncate/requantize. Works on a plain
@@ -77,36 +65,6 @@ class QuantMaxPool2d(nn.MaxPool2d):
 		#
 		# Usage:
 		#   pool = QuantMaxPool2d(kernel_size=3, stride=2, padding=1)
-		#   y = pool(x)
-		pass
-
-class QuantMaxPool3d(nn.MaxPool3d):
-		# Plain (unquantized) max pool, 3D. See QuantMaxPool2d above for why max pooling
-		# needs no quantization arguments.
-		#
-		# Arguments: same as torch.nn.MaxPool3d (kernel_size, stride, padding, dilation,
-		#   return_indices, ceil_mode).
-		#
-		# Input:  x, shape (N, C, D, H, W) - Tensor or QuantTensor
-		# Output: shape (N, C, D_out, H_out, W_out) - same type as input
-		#
-		# Usage:
-		#   pool = QuantMaxPool3d(kernel_size=3, stride=2, padding=1)
-		#   y = pool(x)
-		pass
-
-class QuantAdaptiveMaxPool1d(nn.AdaptiveMaxPool1d):
-		# Adaptive (output-size-driven) version of QuantMaxPool1d.
-		#
-		# Arguments:
-		#   - output_size (int or tuple): target output length, e.g. 1
-		#   - return_indices (bool, optional): also return the indices of the max values. Default: False
-		#
-		# Input:  x, shape (N, C, L) - Tensor or QuantTensor
-		# Output: shape (N, C, output_size) - same type as input
-		#
-		# Usage:
-		#   pool = QuantAdaptiveMaxPool1d(output_size=1)
 		#   y = pool(x)
 		pass
 
@@ -126,17 +84,83 @@ class QuantAdaptiveMaxPool2d(nn.AdaptiveMaxPool2d):
 		#   y = pool(x)
 		pass
 
-class QuantAdaptiveMaxPool3d(nn.AdaptiveMaxPool3d):
-		# Adaptive (output-size-driven) version of QuantMaxPool3d.
-		#
-		# Arguments:
-		#   - output_size (int or tuple): target output spatial size, e.g. (1, 1, 1)
-		#   - return_indices (bool, optional): also return the indices of the max values. Default: False
-		#
-		# Input:  x, shape (N, C, D, H, W) - Tensor or QuantTensor
-		# Output: shape (N, C, *output_size) - same type as input
-		#
-		# Usage:
-		#   pool = QuantAdaptiveMaxPool3d(output_size=(1, 1, 1))
-		#   y = pool(x)
-		pass
+
+def _c_div(a, b):
+	"""C integer division on a float tensor holding integers: truncates toward
+	zero, where torch's floor_divide floors."""
+	q = torch.trunc(torch.abs(a) / abs(b))
+	return torch.where(a < 0, -q, q)
+
+
+def div_round_torch(a, b):
+	"""runtime.h's div_round, on a tensor of integer-valued floats.
+
+	Mirrors deepsocflow/py/brevitas/sim.py::div_round exactly; that one is pinned
+	against the compiled C macro, and this one is pinned against it in turn.
+	"""
+	correction = torch.bitwise_and(
+		torch.bitwise_not(torch.bitwise_or(
+			torch.full_like(a, b, dtype=torch.int64),
+			_c_div(a, b).to(torch.int64))),
+		1).to(a.dtype)
+	return _c_div(a + (b // 2) - correction, b)
+
+
+class QuantAvgPool2dDivRound(nn.Module):
+	"""Average pool over a QuantTensor using the engine's integer arithmetic.
+
+	The hardware sums a pooling window in integers and then divides with
+	`runtime.h`'s `div_round` macro. That macro is not round-half-away-from-zero: it
+	deviates by up to 1 LSB on roughly half of all inputs, almost always on negative
+	ones (`div_round(-4, 4)` is `0`, not `-1`). A float average, or QuantAvgPool2d
+	above (brevitas's TruncAvgPool2d, which sums and then *truncates to a bit
+	width* - a shift rather than a divide), both disagree with it.
+
+	So this module computes what the hardware computes. That is the same choice the
+	LUT work landed on: a model whose accuracy figure does not describe what the
+	hardware will do is worse than a slower one that does. The cost is that average
+	pooling here is genuinely a coarser operation than `nn.AvgPool2d`; calibration
+	and QAT can at least see that, which they cannot if the divergence is hidden
+	until deployment.
+
+	Input and output share a scale: the average of values on a grid stays on that
+	grid, so nothing is requantized and the output is a valid QuantTensor with the
+	incoming scale, zero point and bit width.
+
+	Only 'valid' padding (torch `padding=0`) is implemented. Under 'same' the
+	engine's divisor shrinks at the borders (`count` comes from the clipped window,
+	`runtime.h:535`), which is a separate and larger piece of work.
+	"""
+
+	def __init__(self, kernel_size, stride=None, padding=0):
+		super().__init__()
+		self.kernel_size = kernel_size
+		self.stride = stride if stride is not None else kernel_size
+		self.padding = padding
+		kh, kw = kernel_size if isinstance(kernel_size, (tuple, list)) else (kernel_size,) * 2
+		self.count = int(kh) * int(kw)
+		assert (padding == 0 or padding == (0, 0)), (
+			f"pool padding {padding} is not supported - only 'valid' pooling is "
+			f"implemented, because the engine's divisor shrinks at the borders "
+			f"under 'same' padding")
+
+	def forward(self, x):
+		if not isinstance(x, IntQuantTensor):
+			# brevitas's calibration_mode disables the upstream activation's
+			# quantizer while it collects statistics, so the pool is handed a plain
+			# tensor on that pass. There is no grid to work on yet and the values
+			# only feed scale statistics, so an ordinary mean is both the best
+			# available answer and harmless. Every real inference pass takes the
+			# integer path below.
+			return F.avg_pool2d(x, self.kernel_size, self.stride, self.padding)
+
+		# avg_pool2d gives the mean; multiplying by the (constant, 'valid') window
+		# size recovers the integer sum the engine accumulates. The round() is not
+		# a rounding decision, just undoing float division error on an exact value.
+		ints = torch.round(x.value / x.scale)
+		window_sum = torch.round(
+			F.avg_pool2d(ints, self.kernel_size, self.stride, self.padding) * self.count)
+		out_ints = div_round_torch(window_sum, self.count)
+
+		return IntQuantTensor(
+			out_ints * x.scale, x.scale, x.zero_point, x.bit_width, x.signed, x.training)
