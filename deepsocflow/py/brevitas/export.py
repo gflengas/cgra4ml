@@ -45,9 +45,50 @@ def check_hardware(model, hw):
         # (which pads to the hardware's max channel depth, not the model's actual
         # shape) - that padding only matters once engine-layout export (Phase 2,
         # not in this plan) is wired in.
-        acc_width = hw.K_BITS + hw.X_BITS + clog2(bundle['in_features'])
+        #
+        # A conv accumulates over KH*KW*CI taps rather than CI, so the kernel area
+        # counts toward the accumulator's growth; leaving it out would under-report
+        # the width by clog2(KH*KW) - 4 bits for a 3x3 - and let a model through
+        # that overflows the engine's accumulator.
+        taps = bundle['in_features']
+        if bundle['type'] == 'conv':
+            kh, kw = bundle['conv']['kernel_size']
+            taps *= kh * kw
+        acc_width = hw.K_BITS + hw.X_BITS + clog2(taps)
         assert acc_width <= hw.Y_BITS, (
             f"bundle '{name}': ACC_WIDTH={acc_width} > hw.Y_BITS={hw.Y_BITS}")
+
+        # rtl_export.py::_conv2d_same recomputes the golden per-pass conv sums in
+        # float32, so its 24-bit mantissa - not hw.Y_BITS - is the real ceiling on
+        # how large an exactly-representable accumulator can get. The two bounds
+        # are independent, and only this one catches a wide-but-Y_BITS-legal conv.
+        if bundle['type'] == 'conv':
+            assert acc_width <= 24, (
+                f"bundle '{name}': conv ACC_WIDTH={acc_width} exceeds float32's 24-bit "
+                f"mantissa, which rtl_export.py::_conv2d_same accumulates its golden "
+                f"per-pass sums in - those sums would round instead of being exact")
+
+        # Residual add. The hardware adds its two operands raw (runtime.h:451) -
+        # Bundle_t carries no add_val_shift/add_a_shift - so they must already sit
+        # on the same fractional grid. The Python side would happily align them
+        # (XTensor.add_val_shift shifts both onto max(frac)), which is exactly why
+        # this has to be checked here: a mismatch produces a model that simulates
+        # correctly and runs wrong on hardware by a power of two, and it also
+        # corrupts aa_shift, which is derived from the summed frac.
+        skip_from = bundle.get('skip_from')
+        if skip_from is not None:
+            src = model.bundles[skip_from]
+            assert src['act_frac'] == bundle['act_frac'], (
+                f"bundle '{name}': residual operands are on different fractional grids "
+                f"- '{skip_from}' has act_frac={src['act_frac']}, '{name}' has "
+                f"act_frac={bundle['act_frac']}. The hardware adds them without "
+                f"aligning, so they must match; share the activation quantizer "
+                f"between the two bundles (ptq.py's `residuals` does this).")
+            # The sum needs one bit more than either operand; the add activation
+            # requantizes it back, and its output still has to fit the datapath.
+            assert bundle['add']['act_bits'] <= hw.X_BITS, (
+                f"bundle '{name}': add activation act_bits={bundle['add']['act_bits']} "
+                f"> hw.X_BITS={hw.X_BITS}")
 
         # LUT activations (deepsocflow/py/brevitas/lut.py). Same reasoning as the
         # weight/bias checks above: adapter.py hands the table to the legacy

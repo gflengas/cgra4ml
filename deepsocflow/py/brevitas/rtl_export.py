@@ -186,15 +186,19 @@ def _export_bundles(hw, x):
 
         '''Find and assign a free buffer. If not, add new buffer'''
         b.add_out_buffer_idx = -1
-        if len(b.next_add_ibs) != 0:
+        # sorted() for the same reason next_ibs is sorted above: the free step
+        # below reads buf['out'][-1] as "the last consumer", so the order has to
+        # be ascending regardless of what the caller handed us.
+        next_add_ibs = sorted(b.next_add_ibs)
+        if len(next_add_ibs) != 0:
             for im in range(len(add_buffer_map)):
                 if add_buffer_map[im] is None:
-                    add_buffer_map[im] = {'in':b.ib, 'out':b.next_add_ibs}
+                    add_buffer_map[im] = {'in':b.ib, 'out':next_add_ibs}
                     b.add_out_buffer_idx = im
                     break
             else: #m if break is not hit
                 b.add_out_buffer_idx = len(add_buffer_map)
-                add_buffer_map += [{'in':b.ib, 'out':b.next_add_ibs}]
+                add_buffer_map += [{'in':b.ib, 'out':next_add_ibs}]
 
         print('add_out_buffer_idx:', b.add_out_buffer_idx)
 

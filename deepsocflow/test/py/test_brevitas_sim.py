@@ -241,14 +241,18 @@ def test_relu_bundle_gets_no_lut(tmp_path):
 
 
 def test_unsupported_layer_type_raises(tmp_path):
+    # 'conv' used to be the rejected case here; it is executed now, so the test
+    # needs a type that genuinely has no implementation. Pooling is the honest
+    # choice: ptq.py has a POOL_MAP and sim.py has no pooling arithmetic at all,
+    # so a JSON naming it must fail loudly rather than be silently skipped.
     layers = {
         "bundle0": _bundle(input_frac=7, input_bits=8,
                             weight_values=[[64, 64]], weight_frac=6, weight_bits=8,
                             bias_values=[0], bias_frac=13, bias_bits=16,
-                            activation="identity", act_bits=8, act_frac=6, type_="conv"),
+                            activation="identity", act_bits=8, act_frac=6, type_="pool"),
     }
     json_path = _write_graph(tmp_path, layers)
-    with pytest.raises(ValueError, match="conv"):
+    with pytest.raises(ValueError, match="pool"):
         FixedPointModel(json_path)
 
 

@@ -330,10 +330,34 @@ extern EXT_C void run(Memory_st *restrict mp) {
               FILE *fp_sum = fopen(f_path_sum, "a");
 #endif
 
+#ifdef SIM
+              i32 stall_spin = 0;
+#endif
               while (!fb_read_reg32(p_config + A_DONE_WRITE + ocm_bank))
               {
                 // wait
-              }; 
+#ifdef SIM
+                // A hang here means the PL never signalled this OCM bank as
+                // written. Each spin is a DPI AXI-lite read, so it advances real
+                // simulated clock cycles - a few thousand is far past any legitimate
+                // wait. A_W_DONE/A_X_DONE/A_O_DONE exist precisely to tell which of
+                // the three DMAs is idle when this happens (see their declarations).
+                if (++stall_spin > 5000) {
+                  printf("\nSTALL ib:%d ip:%d it:%d in:%d il:%d iw_kw2:%d ocm_bank:%d o_bpt:%d\n",
+                         ib, ip, it, in, il, iw_kw2, ocm_bank, o_bpt);
+                  printf("STALL W_DONE:%d X_DONE:%d O_DONE:%d  DONE_READ:[%d,%d]  DONE_WRITE:[%d,%d]  BUNDLE_DONE:%d\n\n",
+                         fb_read_reg32(p_config + A_W_DONE),
+                         fb_read_reg32(p_config + A_X_DONE),
+                         fb_read_reg32(p_config + A_O_DONE),
+                         fb_read_reg32(p_config + A_DONE_READ + 0),
+                         fb_read_reg32(p_config + A_DONE_READ + 1),
+                         fb_read_reg32(p_config + A_DONE_WRITE + 0),
+                         fb_read_reg32(p_config + A_DONE_WRITE + 1),
+                         fb_read_reg32(p_config + A_BUNDLE_DONE));
+                  exit(1);
+                }
+#endif
+              };
               flush_cache(&(mp->ocm[ocm_bank]), o_bpt);
               usleep(0);
               fb_write_reg32(p_config + A_DONE_WRITE + ocm_bank, 0);

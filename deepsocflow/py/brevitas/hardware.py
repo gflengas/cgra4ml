@@ -35,6 +35,8 @@ class Hardware:
             max_n_bundles: int = 64,
             ram_weights_depth: int = 512,
             ram_edges_depth: int|None = 288,
+            delay_mul: int = 3,
+            delay_w_ram: int = 2,
             axi_width: int = 64,
             header_width: int = 64,
             config_baseaddr = "B0000000",
@@ -97,6 +99,10 @@ class Hardware:
         '''
 
         self.RAM_EDGES_DEPTH       = ram_edges_depth
+        # Were hardcoded in the config_hw.svh template as 'constant, for now';
+        # surfaced so the engine's pipeline depths can be swept.
+        self.DELAY_MUL             = delay_mul
+        self.DELAY_W_RAM           = delay_w_ram
         '''
         | Depth of RAM needed for edge padding.
         |     if k == 1 -> 0
@@ -192,8 +198,8 @@ class Hardware:
 `define RAM_EDGES_DEPTH     {self.RAM_EDGES_DEPTH    :<10}  // max (KW * CI * XW), across layers when KW != 1
 `define W_BPT               {self.W_BPT              :<10}  // Width of output integer denoting bytes per transfer
 
-`define DELAY_MUL           3            // constant, for now
-`define DELAY_W_RAM         2            // constant, for now
+`define DELAY_MUL           {self.DELAY_MUL          :<10}  // multiplier pipeline depth
+`define DELAY_W_RAM         {self.DELAY_W_RAM        :<10}  // weight-RAM read latency
 
 `define AXI_WIDTH           {self.AXI_WIDTH          :<10}
 `define HEADER_WIDTH        {self.HEADER_WIDTH       :<10}

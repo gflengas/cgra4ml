@@ -39,6 +39,30 @@ deepsocflow/py/brevitas/hardware.json
 deepsocflow/py/brevitas/util.txt
 deepsocflow/py/brevitas/mem_bytes.txt
 deepsocflow/py/brevitas/vivado_flow.tcl
+# config.json is the PYNQ driver's mirror of config_fw.h, written by
+# rtl_export.py::_export_bundles alongside it (added with the LUT work).
+deepsocflow/py/brevitas/config.json
+# conv_main.py writes one engine-layout directory and one graph JSON per
+# bring-up stage, so these are per-stage rather than the single 'vectors/'
+# main.py produces.
+deepsocflow/py/brevitas/vectors_*/
+deepsocflow/py/brevitas/model/conv_*.json
+deepsocflow/py/brevitas/model/conv.pt
+deepsocflow/py/brevitas/model/conv.onnx
+
+# Same generated set again, at the worktree root: the exporters write
+# config_fw.h and friends into the CURRENT WORKING DIRECTORY, so running any
+# export script from the repo root drops them here instead.
+/config.json
+/config_fw.h
+/config_hw.svh
+/config_hw.tcl
+/config_tb.svh
+/hardware.json
+/sources.txt
+/util.txt
+/mem_bytes.txt
+/vivado_flow.tcl
 
 # Other files
 old/

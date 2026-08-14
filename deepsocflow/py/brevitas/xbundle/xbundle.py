@@ -6,10 +6,18 @@ from deepsocflow.py.brevitas.xlayer.quantOperation import QuantResidualAdd
 
 class XBundle(nn.Module):
 
-    def __init__(self, core, pool=None, add_act=None, flatten=False, softmax=False, *args, **kwargs):
+    def __init__(self, core, pool=None, add_act=None, flatten=False, softmax=False,
+                 pre_pad=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.core = core
         self.pool = pool
+        # An explicit pad applied before the core, used only to express TF-'same'
+        # asymmetric padding for a STRIDED conv - torch's Conv2d(padding=) can
+        # only pad symmetrically, and for an even input size that lands the first
+        # window one pixel away from where the engine puts it. It exists purely so
+        # the float model matches the hardware; the engine still receives the
+        # UNPADDED tensor and does its own padding internally.
+        self.pre_pad = pre_pad
 
         self.add = QuantResidualAdd(act=add_act) if add_act else None
         self.flatten = nn.Flatten() if flatten else None
@@ -28,6 +36,9 @@ class XBundle(nn.Module):
         if hasattr(x, "ib"):
             self.prev_ib = x.ib
             BUNDLES[self.prev_ib].next_ibs += [self.ib]
+
+        if self.pre_pad is not None:
+            x = self.pre_pad(x)
 
         x = self.core(x)
         x = self.core.act(x)
