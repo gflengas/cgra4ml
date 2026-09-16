@@ -470,7 +470,8 @@ model = Model(inputs=[x_in], outputs=[x])
 Train Model
 '''
 
-model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.0001), metrics=["accuracy"])
+# QAT (quantization-aware training) disabled - load pretrained/PTQ weights instead
+# model.compile(loss="categorical_crossentropy", optimizer=Adam(learning_rate=0.0001), metrics=["accuracy"])
 # history = model.fit(
 #         x_train, 
 #         y_train, 

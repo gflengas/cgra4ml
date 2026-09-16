@@ -202,7 +202,8 @@ model = Model(inputs=[x_in], outputs=[x])
 '''
 Train Model
 '''
-model.compile(loss="mse", optimizer=Adam(learning_rate=0.0001), metrics=["mse"])
+# QAT (quantization-aware training) disabled - load pretrained/PTQ weights instead
+# model.compile(loss="mse", optimizer=Adam(learning_rate=0.0001), metrics=["mse"])
 #history = model.fit(
 #        train_loader,
 #        #x_train, 

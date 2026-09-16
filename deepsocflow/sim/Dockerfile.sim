@@ -1,0 +1,41 @@
+# Minimal Verilator-only image for running deepsocflow's RTL simulation.
+#
+# Why not the project's own Dockerfile (repo root): that one builds a full dev
+# environment (all Python deps, plus a RISC-V toolchain that is x86_64-prebuilt
+# and likely to fail on arm64 hosts). None of that is needed here. The pipeline
+# splits cleanly in three - (1) Python generates vectors/config_fw.h/config_hw.svh,
+# (2) verilator builds and runs the testbench, (3) Python diffs sim output against
+# expected - and only step 2 needs Linux. Steps 1 and 3 already work on a macOS
+# host, so this image carries just verilator and a C++ toolchain.
+#
+# Verilator version is pinned to match the project's own Dockerfile (v5.024).
+# On Linux/libstdc++ its coroutine runtime compiles fine; it is Apple clang's
+# libc++ (tested: clang 21) that it cannot build against. See CLAUDE.md's
+# "Verilator version" Known Issue for why the version pin matters at all.
+FROM debian:bookworm-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        git \
+        autoconf \
+        flex \
+        bison \
+        help2man \
+        perl \
+        python3 \
+        ccache \
+        libfl-dev \
+        zlib1g-dev \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG VERILATOR_VERSION=v5.024
+RUN git clone https://github.com/verilator/verilator.git \
+    && cd verilator && git checkout ${VERILATOR_VERSION} \
+    && autoconf && ./configure \
+    && make -j"$(nproc)" && make install \
+    && cd .. && rm -rf verilator
+
+WORKDIR /work

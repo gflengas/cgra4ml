@@ -23,7 +23,7 @@ class XInputAct(QActivation):
 @keras.saving.register_keras_serializable()
 class XModel(Layer):
 
-    def __init__(self, sys_bits, x_int_bits, *args, **kwargs):
+    def __init__(self, sys_bits, x_int_bits, *args, **kwargs):  # sys_bits: SYS_BITS(x,k,b), x_int_bits: input integer bits
         super().__init__(*args, **kwargs)
         self.sys_bits = sys_bits
         self.x_int_bits = x_int_bits
@@ -40,7 +40,7 @@ class XModel(Layer):
 
 
 def export_inference(model, hw, batch_size=1):
-    
+    # b: a Bundle (one fused conv/dense+act(+add/pool/flatten) group), ib: that bundle's index in BUNDLES
     for b in BUNDLES:
         b.next_ibs.clear()
         b.next_add_ibs.clear()
@@ -59,7 +59,7 @@ def export_inference(model, hw, batch_size=1):
     for i, b in enumerate(BUNDLES):
         print(f"Bundle {i}: {b}")
 
-    x = XTensor(tensor=x_qtensor, bits=hw.X_BITS, int=user_model.x_int_bits)   
+    x = XTensor(tensor=x_qtensor, bits=hw.X_BITS, int=user_model.x_int_bits)  # x: quantized input activation
 
 
     '''
@@ -75,7 +75,14 @@ def export_inference(model, hw, batch_size=1):
 
     print("\n-----------STARTING EXPORT-----------\n")
 
+    return _export_bundles(hw, x)
 
+
+def _export_bundles(hw, x):
+    """Bundle loop shared by both backends. Assumes BUNDLES is already populated
+    and, for the brevitas backend, that each bundle's integer tensors are already
+    computed (its call_int is a no-op). `x` is the input XTensor consumed by
+    bundle 0's call_int; the brevitas backend passes None."""
     add_buffer_map = []
     out_buffer_map = []
 
@@ -91,9 +98,9 @@ def export_inference(model, hw, batch_size=1):
 
         '''Find and assign a free buffer. If not, add new buffer'''
         b.out_buffer_idx = -1
-        next_ibs = sorted(deepcopy(b.next_ibs))
+        next_ibs = sorted(deepcopy(b.next_ibs))  # next_ibs: bundle indices (ib) that consume this bundle's output
         if len(next_ibs) != 0:
-            for im in range(len(out_buffer_map)):
+            for im in range(len(out_buffer_map)):  # im: index of a buffer slot in the map
                 if out_buffer_map[im] is None:
                     out_buffer_map[im] = {'in':b.ib, 'out':next_ibs}
                     b.out_buffer_idx = im
@@ -156,33 +163,35 @@ def export_inference(model, hw, batch_size=1):
         ch.write(f"#define N_BUNDLES {len(BUNDLES)}\n")
         ch.write(f"Bundle_t bundles [N_BUNDLES] = {{\n")
         
+        # Naming below: _bpt = bytes per transfer, _b suffix = value for the current bundle,
+        # ca_/aa_/pa_ prefixes = core/residual-add/pool activation params (nzero/shift/pl_scale, see XActivation)
         for ib, b in enumerate(BUNDLES):
             assert ib == b.ib
 
-            w_bpt    = (hw.K_BITS*b.we[-1][0].size)//8
-            w_bpt_p0 = (hw.K_BITS*b.we[0][0].size)//8
-            x_bpt    = (hw.X_BITS*b.xe[-1].size)//8 
-            x_bpt_p0 = (hw.X_BITS*b.xe[0].size )//8
-            
+            w_bpt    = (hw.K_BITS*b.we[-1][0].size)//8  # weight bytes-per-transfer (last pass)
+            w_bpt_p0 = (hw.K_BITS*b.we[0][0].size)//8    # weight bytes-per-transfer (pass 0)
+            x_bpt    = (hw.X_BITS*b.xe[-1].size)//8      # input bytes-per-transfer (last pass)
+            x_bpt_p0 = (hw.X_BITS*b.xe[0].size )//8      # input bytes-per-transfer (pass 0)
+
             if ib == len(BUNDLES)-1:
                 o_words_b = b.o_int.size
                 o_bytes_b = o_words_b*4 # int or float
                 o_words = o_words_b
             else:
                 b_next    = BUNDLES[ib+1]
-                o_wpt     = b_next.xe[-1].size
-                o_wpt_p0  = b_next.xe[0].size
+                o_wpt     = b_next.xe[-1].size    # output words-per-transfer, i.e. next bundle's input (last pass)
+                o_wpt_p0  = b_next.xe[0].size     # output words-per-transfer, i.e. next bundle's input (pass 0)
                 o_words_b = o_wpt_p0 + (b_next.r.CP-1)*o_wpt
 
-                o_bpt = (hw.X_BITS*b_next.xe[-1].size)//8
-                o_bpt_p0 = (hw.X_BITS*b_next.xe[0].size)//8
+                o_bpt = (hw.X_BITS*b_next.xe[-1].size)//8    # output bytes-per-transfer (last pass)
+                o_bpt_p0 = (hw.X_BITS*b_next.xe[0].size)//8  # output bytes-per-transfer (pass 0)
                 o_bytes_b = o_bpt_p0 + (b_next.r.CP-1)*o_bpt
 
-            xp_words  = b.r.XN * b.r.XL * b.r.XW * (hw.ROWS+b.r.X_PAD)
+            xp_words  = b.r.XN * b.r.XL * b.r.XW * (hw.ROWS+b.r.X_PAD)  # input words per pass (p)
 
             w_bytes_b = (w_bpt_p0 + (b.r.CP-1)*w_bpt)*b.r.IT
             x_bytes_b = (x_bpt_p0 + (b.r.CP-1)*x_bpt)
-            nhwc_words_b = b.r.XN * b.r.XH * b.r.XW * b.r.CO
+            nhwc_words_b = b.r.XN * b.r.XH * b.r.XW * b.r.CO  # output words in N,H,W,C layout
 
             x_bytes_max = max(x_bytes_max, x_bytes_b)
             nhwc_words_max = max(nhwc_words_max, nhwc_words_b)
@@ -191,22 +200,22 @@ def export_inference(model, hw, batch_size=1):
             w_bytes += w_bytes_b
             x_bytes_all += x_bytes_b
 
-            ib_out = -1 if len(b.next_ibs) == 0 else sorted(b.next_ibs)[0]
+            ib_out = -1 if len(b.next_ibs) == 0 else sorted(b.next_ibs)[0]  # bundle index (ib) of consumer, or -1 if none
 
             if ib == 0:
                 x_bytes = (x_bpt_p0 + (b.r.CP-1)*x_bpt)
 
-            y_coe = b.r.CO_PRL
-            y_coe_tl = b.r.CO_PRL if (b.r.CO==b.r.IT*b.r.CO_PRL) else b.r.CO%b.r.IT
-            y_r_ll = hw.ROWS if b.r.XH==b.r.XL*hw.ROWS else  b.r.XH % hw.ROWS
+            y_coe = b.r.CO_PRL  # output channels processed in parallel per iteration
+            y_coe_tl = b.r.CO_PRL if (b.r.CO==b.r.IT*b.r.CO_PRL) else b.r.CO%b.r.IT  # coe count in the tail (last) iteration
+            y_r_ll = hw.ROWS if b.r.XH==b.r.XL*hw.ROWS else  b.r.XH % hw.ROWS        # row count in the last (ll) row-block
 
-            ca_nzero, ca_shift, ca_pl_scale = b.core.act.non_zero, b.core.act.shift_bits, b.core.act.plog_slope
+            ca_nzero, ca_shift, ca_pl_scale = b.core.act.non_zero, b.core.act.shift_bits, b.core.act.plog_slope  # core (conv/dense) activation params
 
-            (aa_nzero, aa_shift, aa_pl_scale) = (b.add .act.non_zero, b.add .act.shift_bits, b.add .act.plog_slope)if b.add  is not None else (0,0,0)
-            (pa_nzero, pa_shift, pa_pl_scale) = (b.pool.act.non_zero, b.pool.act.shift_bits, b.pool.act.plog_slope)if b.pool is not None else (0,0,0)
+            (aa_nzero, aa_shift, aa_pl_scale) = (b.add .act.non_zero, b.add .act.shift_bits, b.add .act.plog_slope)if b.add  is not None else (0,0,0)  # residual-add activation params
+            (pa_nzero, pa_shift, pa_pl_scale) = (b.pool.act.non_zero, b.pool.act.shift_bits, b.pool.act.plog_slope)if b.pool is not None else (0,0,0)  # pool activation params
 
             add_out_buffer_idx = b.add_out_buffer_idx
-            add_in_buffer_idx = BUNDLES[b.add.source_ib].add_out_buffer_idx if b.add is not None else -1
+            add_in_buffer_idx = BUNDLES[b.add.source_ib].add_out_buffer_idx if b.add is not None else -1  # buffer holding this bundle's residual/skip input
             in_buffer_idx = BUNDLES[b.prev_ib].out_buffer_idx if b.prev_ib is not None else -1
 
             if b.pool is None:
@@ -277,11 +286,11 @@ def export_inference(model, hw, batch_size=1):
             x_bitstring_b = b''
             if b.core.b:
                 b_bitstring += b.be.astype(type_d['np'][hw.B_BITS]).tobytes()
-            for ip in range(b.r.CP):
+            for ip in range(b.r.CP):  # ip: pass index (0..CP-1)
                 xe = pack_words_into_bytes(arr=b.xe[ip].flatten(), bits=hw.X_BITS)
                 x_bitstring_b += xe.tobytes()
-                    
-                for it in range(b.r.IT):
+
+                for it in range(b.r.IT):  # it: iteration index (0..IT-1)
                     we = pack_words_into_bytes(arr=b.we[ip][it].flatten(), bits=hw.K_BITS)
                     w_bitstring += we.tobytes()
             x_bitstring += x_bitstring_b
@@ -331,7 +340,8 @@ def export_inference(model, hw, batch_size=1):
 
 
 def verify_inference(model, hw, SIM, SIM_PATH='', TRACE=False):
-
+    # SIM: simulator name ('verilator'/'icarus'/'xsim'), SIM_PATH: dir containing the simulator binary, TRACE: enable waveform dump
+    # Below: _exp = expected value (computed in Python), _sim = value read back from the RTL simulation output
     '''
     RUN SIMULATION
     '''
@@ -343,10 +353,10 @@ def verify_inference(model, hw, SIM, SIM_PATH='', TRACE=False):
     '''
     for ib, b in enumerate(BUNDLES):
         assert ib == b.ib
-        
+
         ''' Verify raw output '''
-        for ip in range(b.r.CP):
-            for it in range(b.r.IT):
+        for ip in range(b.r.CP):      # ip: pass index
+            for it in range(b.r.IT):  # it: iteration index
                 y_raw_exp = b.ye_exp_p[ip][it]
                 y_raw_sim = np.loadtxt(f"{hw.DATA_DIR}/{b.ib}_{ip}_{it}_y_raw_sim.txt", np.int32)[:y_raw_exp.size].reshape(y_raw_exp.shape)
                 error = np.sum(np.abs(y_raw_exp-y_raw_sim))
